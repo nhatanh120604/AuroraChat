@@ -1,0 +1,5 @@
+Flask==2.2.5
+python-socketio==5.8.0
+eventlet==0.33.3
+PySide6==6.6.2
+requests==2.32.5
