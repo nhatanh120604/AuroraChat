@@ -83,15 +83,16 @@ class ChatServer:
 
                 if recipient_sid:
                     # Send private message to recipient only
-                    self.sio.emit(
-                        "private_message_received",
-                        {
-                            "sender": sender_username,
-                            "recipient": recipient_username,
-                            "message": message,
-                        },
-                        to=recipient_sid,
-                    )
+                    payload = {
+                        "sender": sender_username,
+                        "recipient": recipient_username,
+                        "message": message,
+                    }
+                    # Forward timestamp if present for latency calculation
+                    if "timestamp" in data:
+                        payload["timestamp"] = data["timestamp"]
+
+                    self.sio.emit("private_message_received", payload, to=recipient_sid)
 
                     if not self.test:
                         print(
