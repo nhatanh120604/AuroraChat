@@ -80,7 +80,9 @@ class ChatServer:
                     to=sid,
                 )
                 if not self.test:
-                    print(f"Private message failed: {sender_username} tried to message themselves.")
+                    print(
+                        f"Private message failed: {sender_username} tried to message themselves."
+                    )
                 return
 
             if recipient_username and message:
