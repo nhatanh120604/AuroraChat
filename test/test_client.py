@@ -35,7 +35,9 @@ class FakeSocketIOClient:
     def emit(self, event: str, data: Dict[str, Any]) -> None:
         self.emitted.append((event, data))
 
-    def connect(self, url: str) -> None:  # pragma: no cover - behaviour verified indirectly
+    def connect(
+        self, url: str
+    ) -> None:  # pragma: no cover - behaviour verified indirectly
         self.connected = True
         handler = self.handlers.get("connect")
         if handler:
@@ -58,7 +60,9 @@ def qt_app() -> QCoreApplication:
 
 
 @pytest.fixture()
-def chat_client(monkeypatch: pytest.MonkeyPatch) -> Tuple[ChatClient, FakeSocketIOClient]:
+def chat_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Tuple[ChatClient, FakeSocketIOClient]:
     fake_client = FakeSocketIOClient()
     monkeypatch.setattr("client.client.socketio.Client", lambda: fake_client)
 
@@ -71,7 +75,9 @@ def chat_client(monkeypatch: pytest.MonkeyPatch) -> Tuple[ChatClient, FakeSocket
     chat.disconnect()
 
 
-def test_register_sends_event_and_updates_username(chat_client: Tuple[ChatClient, FakeSocketIOClient]) -> None:
+def test_register_sends_event_and_updates_username(
+    chat_client: Tuple[ChatClient, FakeSocketIOClient],
+) -> None:
     chat, fake = chat_client
     name_updates: List[str] = []
     chat.usernameChanged.connect(name_updates.append)
@@ -88,7 +94,7 @@ def test_register_sends_event_and_updates_username(chat_client: Tuple[ChatClient
 
 
 def test_error_event_emits_signal_and_resets_desired_username(
-    chat_client: Tuple[ChatClient, FakeSocketIOClient]
+    chat_client: Tuple[ChatClient, FakeSocketIOClient],
 ) -> None:
     chat, fake = chat_client
     errors: List[str] = []
@@ -102,7 +108,9 @@ def test_error_event_emits_signal_and_resets_desired_username(
     assert chat._desired_username == ""  # type: ignore[attr-defined]
 
 
-def test_send_message_rejects_empty_payload(chat_client: Tuple[ChatClient, FakeSocketIOClient]) -> None:
+def test_send_message_rejects_empty_payload(
+    chat_client: Tuple[ChatClient, FakeSocketIOClient],
+) -> None:
     chat, fake = chat_client
     errors: List[str] = []
     chat.errorReceived.connect(errors.append)
@@ -114,7 +122,9 @@ def test_send_message_rejects_empty_payload(chat_client: Tuple[ChatClient, FakeS
     assert errors[-1] == "Cannot send an empty message."
 
 
-def test_send_private_message_requires_recipient(chat_client: Tuple[ChatClient, FakeSocketIOClient]) -> None:
+def test_send_private_message_requires_recipient(
+    chat_client: Tuple[ChatClient, FakeSocketIOClient],
+) -> None:
     chat, fake = chat_client
     errors: List[str] = []
     chat.errorReceived.connect(errors.append)
@@ -126,7 +136,9 @@ def test_send_private_message_requires_recipient(chat_client: Tuple[ChatClient, 
     assert errors[-1] == "Recipient is required for private messages."
 
 
-def test_send_private_message_requires_body(chat_client: Tuple[ChatClient, FakeSocketIOClient]) -> None:
+def test_send_private_message_requires_body(
+    chat_client: Tuple[ChatClient, FakeSocketIOClient],
+) -> None:
     chat, fake = chat_client
     errors: List[str] = []
     chat.errorReceived.connect(errors.append)

@@ -6,13 +6,14 @@ from PySide6.QtCore import QObject, Signal, Slot, QUrl, Property
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 
+
 class ChatClient(QObject):
-    messageReceived = Signal(str, str)    # username, message
-    privateMessageReceived = Signal(str, str, str) # sender, recipient, message
-    usersUpdated = Signal('QVariant')     # list of usernames
-    disconnected = Signal()               # Signal to notify QML of disconnection
-    errorReceived = Signal(str)           # Notify UI about errors
-    usernameChanged = Signal(str)         # Notify UI when username changes
+    messageReceived = Signal(str, str)  # username, message
+    privateMessageReceived = Signal(str, str, str)  # sender, recipient, message
+    usersUpdated = Signal("QVariant")  # list of usernames
+    disconnected = Signal()  # Signal to notify QML of disconnection
+    errorReceived = Signal(str)  # Notify UI about errors
+    usernameChanged = Signal(str)  # Notify UI when username changes
 
     def __init__(self, url="http://localhost:5000"):
         super().__init__()
@@ -36,11 +37,13 @@ class ChatClient(QObject):
             self._connecting = False
             queued_register = False
             with self._pending_lock:
-                queued_register = any(evt == 'register' for evt, _ in self._pending_events)
+                queued_register = any(
+                    evt == "register" for evt, _ in self._pending_events
+                )
                 pending = list(self._pending_events)
                 self._pending_events.clear()
             if self._desired_username and not queued_register:
-                pending.insert(0, ('register', {'username': self._desired_username}))
+                pending.insert(0, ("register", {"username": self._desired_username}))
             for event, payload in pending:
                 try:
                     self._sio.emit(event, payload)
@@ -56,25 +59,25 @@ class ChatClient(QObject):
             self._pending_events.clear()
             self.usersUpdated.emit([])
             self._set_username("")
-            self.disconnected.emit() # Notify the UI
+            self.disconnected.emit()  # Notify the UI
 
-        @self._sio.on('message')
+        @self._sio.on("message")
         def on_message(data):
-            username = data.get('username', 'Unknown')
-            message = data.get('message', '')
+            username = data.get("username", "Unknown")
+            message = data.get("message", "")
             self.messageReceived.emit(username, message)
 
-        @self._sio.on('private_message_received')
+        @self._sio.on("private_message_received")
         def on_private_message(data):
-            sender = data.get('sender', 'Unknown')
-            recipient = data.get('recipient', 'Unknown')
-            message = data.get('message', '')
+            sender = data.get("sender", "Unknown")
+            recipient = data.get("recipient", "Unknown")
+            message = data.get("message", "")
             self.privateMessageReceived.emit(sender, recipient, message)
 
         # Replaced user_joined with update_user_list to sync with server
-        @self._sio.on('update_user_list')
+        @self._sio.on("update_user_list")
         def on_update_user_list(data):
-            users = data.get('users', [])
+            users = data.get("users", [])
             self._users = users
             if self._desired_username and self._desired_username in users:
                 self._set_username(self._desired_username)
@@ -82,15 +85,15 @@ class ChatClient(QObject):
                 self._set_username("")
             self.usersUpdated.emit(self._users.copy())
 
-        @self._sio.on('error')
+        @self._sio.on("error")
         def on_error(data):
-            message = data.get('message', 'An unknown error occurred.')
+            message = data.get("message", "An unknown error occurred.")
             self._notify_error(message)
             if self._desired_username and self._desired_username == self._username:
                 # Preserve desired username for reconnection attempts but allow UI edits
                 self._set_username("")
             lowered = message.lower()
-            if self._desired_username and 'username' in lowered:
+            if self._desired_username and "username" in lowered:
                 self._desired_username = ""
 
     def _ensure_connected(self):
@@ -109,7 +112,7 @@ class ChatClient(QObject):
                 # if connect fails, reset the flag so we can try again
                 self._connecting = False
                 self._notify_error(f"Connection error: {e}")
-        
+
         t = threading.Thread(target=_connect, daemon=True)
         t.start()
 
@@ -145,7 +148,7 @@ class ChatClient(QObject):
             self._notify_error("Username cannot be empty.")
             return
         self._desired_username = desired
-        self._emit_when_connected('register', {'username': desired})
+        self._emit_when_connected("register", {"username": desired})
 
     @Slot(str)
     def sendMessage(self, message: str):
@@ -153,7 +156,7 @@ class ChatClient(QObject):
         if not text:
             self._notify_error("Cannot send an empty message.")
             return
-        self._emit_when_connected('message', {'message': text})
+        self._emit_when_connected("message", {"message": text})
 
     @Slot(str, str)
     def sendPrivateMessage(self, recipient: str, message: str):
@@ -166,8 +169,8 @@ class ChatClient(QObject):
         if not text:
             self._notify_error("Cannot send an empty private message.")
             return
-        payload = {'recipient': recip, 'message': text}
-        self._emit_when_connected('private_message', payload)
+        payload = {"recipient": recip, "message": text}
+        self._emit_when_connected("private_message", payload)
 
     @Slot()
     def disconnect(self):
@@ -183,6 +186,7 @@ class ChatClient(QObject):
         return self._username
 
     username = Property(str, _get_username, notify=usernameChanged)
+
 
 def main():
     app = QGuiApplication(sys.argv)
@@ -203,6 +207,7 @@ def main():
     if not engine.rootObjects():
         return -1
     return app.exec()
+
 
 if __name__ == "__main__":
     sys.exit(main())
