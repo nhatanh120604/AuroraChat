@@ -10,7 +10,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 
 class ChatServer:
@@ -48,8 +50,12 @@ class ChatServer:
 
             # Input validation
             if not username or not isinstance(username, str) or not username.strip():
-                self.sio.emit("error", {"message": "A valid username is required."}, to=sid)
-                logging.warning(f"Invalid registration attempt from {sid} with username: {username}")
+                self.sio.emit(
+                    "error", {"message": "A valid username is required."}, to=sid
+                )
+                logging.warning(
+                    f"Invalid registration attempt from {sid} with username: {username}"
+                )
                 return
 
             username = username.strip()
@@ -57,8 +63,14 @@ class ChatServer:
             with self.lock:
                 # Enforce unique usernames
                 if username in self.clients.values():
-                    self.sio.emit("error", {"message": f"Username '{username}' is already taken."}, to=sid)
-                    logging.warning(f"Registration failed for {sid}: username '{username}' taken.")
+                    self.sio.emit(
+                        "error",
+                        {"message": f"Username '{username}' is already taken."},
+                        to=sid,
+                    )
+                    logging.warning(
+                        f"Registration failed for {sid}: username '{username}' taken."
+                    )
                     return
 
                 self.clients[sid] = username
@@ -77,8 +89,14 @@ class ChatServer:
             message_text = data.get("message")
 
             # Input validation
-            if not message_text or not isinstance(message_text, str) or not message_text.strip():
-                logging.warning(f"Empty message from {sender_username} ({sid}) ignored.")
+            if (
+                not message_text
+                or not isinstance(message_text, str)
+                or not message_text.strip()
+            ):
+                logging.warning(
+                    f"Empty message from {sender_username} ({sid}) ignored."
+                )
                 return
 
             # The data from the test client is the entire payload.
@@ -105,11 +123,19 @@ class ChatServer:
             message = data.get("message")
 
             # Input validation
-            if not recipient_username or not isinstance(recipient_username, str) or not recipient_username.strip():
-                self.sio.emit("error", {"message": "A valid recipient is required."}, to=sid)
+            if (
+                not recipient_username
+                or not isinstance(recipient_username, str)
+                or not recipient_username.strip()
+            ):
+                self.sio.emit(
+                    "error", {"message": "A valid recipient is required."}, to=sid
+                )
                 return
             if not message or not isinstance(message, str) or not message.strip():
-                self.sio.emit("error", {"message": "Cannot send an empty message."}, to=sid)
+                self.sio.emit(
+                    "error", {"message": "Cannot send an empty message."}, to=sid
+                )
                 return
 
             logging.info(
@@ -123,7 +149,9 @@ class ChatServer:
                     {"message": "You cannot send a private message to yourself."},
                     to=sid,
                 )
-                logging.warning(f"Private message failed: {sender_username} tried to message themselves.")
+                logging.warning(
+                    f"Private message failed: {sender_username} tried to message themselves."
+                )
                 return
 
             if recipient_username and message:
@@ -154,10 +182,14 @@ class ChatServer:
                     # Recipient not found - send error back to sender
                     self.sio.emit(
                         "error",
-                        {"message": f"User '{recipient_username}' not found or offline."},
+                        {
+                            "message": f"User '{recipient_username}' not found or offline."
+                        },
                         to=sid,
                     )
-                    logging.warning(f"Private message failed: {recipient_username} not found for sender {sender_username}")
+                    logging.warning(
+                        f"Private message failed: {recipient_username} not found for sender {sender_username}"
+                    )
             else:
                 # Invalid message data - send error back to sender
                 self.sio.emit(
