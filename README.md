@@ -10,18 +10,18 @@ This section details issues that currently exist in the codebase, ranging from o
 
 ### Server-Side (`server/server.py`)
 
-1.  **Username Not Unique**: The server does not enforce unique usernames. Two different clients can register with the exact same username. This breaks the private messaging feature, as the server will only send a message to the first client it finds with that name. (DONE)
-2.  **No Input Validation**: The server completely trusts client input. A malicious client could bypass the UI and send empty or improperly formatted data, which could cause unexpected behavior or crashes. (DONE)
-3.  **State Management is Not Thread-Safe**: The `self.clients` dictionary is modified directly in event handlers. While `eventlet` is single-threaded, this is not a safe practice for concurrent environments. If the server were ever run with multiple worker processes, this would lead to immediate race conditions. A `threading.Lock` should be used for all reads and writes to `self.clients`. (DONE)
-4.  **No Formal Logging**: The server uses `print()` for logging. For any real application, a proper logging library (like Python's `logging` module) should be configured to control log levels, format output, and direct logs to files or other services. (DONE)
-5.  **Hardcoded Configuration**: The server address and port (`localhost:5000`) are hardcoded. This should be loaded from environment variables or a configuration file to allow for flexible deployment. (DONE)
+1. **Username Not Unique**: The server does not enforce unique usernames. Two different clients can register with the exact same username. This breaks the private messaging feature, as the server will only send a message to the first client it finds with that name. (DONE)
+2. **No Input Validation**: The server completely trusts client input. A malicious client could bypass the UI and send empty or improperly formatted data, which could cause unexpected behavior or crashes. (DONE)
+3. **State Management is Not Thread-Safe**: The `self.clients` dictionary is modified directly in event handlers. While `eventlet` is single-threaded, this is not a safe practice for concurrent environments. If the server were ever run with multiple worker processes, this would lead to immediate race conditions. A `threading.Lock` should be used for all reads and writes to `self.clients`. (DONE)
+4. **No Formal Logging**: The server uses `print()` for logging. For any real application, a proper logging library (like Python's `logging` module) should be configured to control log levels, format output, and direct logs to files or other services. (DONE)
+5. **Hardcoded Configuration**: The server address and port (`localhost:5000`) are hardcoded. This should be loaded from environment variables or a configuration file to allow for flexible deployment. (DONE)
 
 ### Client-Side (`client.py` & `Main.qml`)
 
-1.  **Server Errors Are Ignored**: The server sends an `error` event when a private message fails (e.g., user not found), but the client (`client.py`) has no handler for this event. The user is never notified of the failure.
-2.  **Inefficient Message Sending**: The `_emit_when_connected` function in `client.py` uses a `time.sleep()` loop to wait for a connection before sending a message. A more professional approach would be to queue the messages and send them immediately upon receiving the `connect` event from the server.
-3.  **Duplicate State**: The client's username is stored in both the `_username` property in `client.py` and the `usernameField.text` property in `Main.qml`. The Python object should be the single source of truth.
-4.  **No Visual Feedback for Send Failures**: If a message fails to send because the client is not connected (the `_emit_when_connected` timeout is reached), the message text is cleared, but the user receives no error. The message simply vanishes.
+1. **Server Errors Are Ignored**: The server sends an `error` event when a private message fails (e.g., user not found), but the client (`client.py`) has no handler for this event. The user is never notified of the failure. (DONE)
+2. **Inefficient Message Sending**: The `_emit_when_connected` function in `client.py` uses a `time.sleep()` loop to wait for a connection before sending a message. A more professional approach would be to queue the messages and send them immediately upon receiving the `connect` event from the server. (DONE)
+3. **Duplicate State**: The client's username is stored in both the `_username` property in `client.py` and the `usernameField.text` property in `Main.qml`. The Python object should be the single source of truth. (DONE)
+4. **No Visual Feedback for Send Failures**: If a message fails to send because the client is not connected (the `_emit_when_connected` timeout is reached), the message text is cleared, but the user receives no error. The message simply vanishes. (DONE)
 
 ---
 

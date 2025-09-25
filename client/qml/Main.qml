@@ -31,11 +31,9 @@ ApplicationWindow {
                 id: registerBtn
                 text: "Register"
                 onClicked: {
-                    if (usernameField.text.length > 0) {
-                        chatClient.register(usernameField.text)
-                        usernameField.enabled = false
-                        // Move focus to the message input field after registration
-                        messageField.focus = true
+                    var name = usernameField.text.trim()
+                    if (name.length > 0) {
+                        chatClient.register(name)
                     }
                 }
             }
@@ -207,7 +205,6 @@ ApplicationWindow {
 
         function onDisconnected() {
             // Reset UI to initial state
-            usernameField.enabled = true
             messagesModel.clear()
             usersModel.clear()
             messagesModel.append({
@@ -215,6 +212,23 @@ ApplicationWindow {
                 "text": "You have been disconnected.",
                 "isPrivate": false
             })
+        }
+
+        function onErrorReceived(message) {
+            messagesModel.append({
+                "user": "System",
+                "text": message,
+                "isPrivate": false
+            })
+            usernameField.enabled = chatClient.username.length === 0
+        }
+
+        function onUsernameChanged(name) {
+            usernameField.text = name
+            usernameField.enabled = name.length === 0
+            if (name.length > 0) {
+                messageField.focus = true
+            }
         }
     }
 }

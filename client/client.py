@@ -1,9 +1,8 @@
 import sys
 import os
 import threading
-import time
 import socketio
-from PySide6.QtCore import QObject, Signal, Slot, QUrl
+from PySide6.QtCore import QObject, Signal, Slot, QUrl, Property
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 
@@ -12,16 +11,21 @@ class ChatClient(QObject):
     privateMessageReceived = Signal(str, str, str) # sender, recipient, message
     usersUpdated = Signal('QVariant')     # list of usernames
     disconnected = Signal()               # Signal to notify QML of disconnection
+    errorReceived = Signal(str)           # Notify UI about errors
+    usernameChanged = Signal(str)         # Notify UI when username changes
 
     def __init__(self, url="http://localhost:5000"):
         super().__init__()
         self._url = url
         self._username = ""
+        self._desired_username = ""
         self._sio = socketio.Client()
         self._connected = False
         self._connecting = False
         self._users = []
         self._connect_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._pending_events = []
         self._setup_handlers()
 
     def _setup_handlers(self):
@@ -30,17 +34,28 @@ class ChatClient(QObject):
             print("Connected")
             self._connected = True
             self._connecting = False
-            if self._username:
+            queued_register = False
+            with self._pending_lock:
+                queued_register = any(evt == 'register' for evt, _ in self._pending_events)
+                pending = list(self._pending_events)
+                self._pending_events.clear()
+            if self._desired_username and not queued_register:
+                pending.insert(0, ('register', {'username': self._desired_username}))
+            for event, payload in pending:
                 try:
-                    self._sio.emit('register', {'username': self._username})
-                except Exception:
-                    pass
+                    self._sio.emit(event, payload)
+                except Exception as exc:
+                    self._notify_error(f"Failed to send '{event}': {exc}")
 
         @self._sio.event
         def disconnect():
             print("Disconnected from server")
             self._connected = False
             self._connecting = False
+            self._users = []
+            self._pending_events.clear()
+            self.usersUpdated.emit([])
+            self._set_username("")
             self.disconnected.emit() # Notify the UI
 
         @self._sio.on('message')
@@ -61,7 +76,22 @@ class ChatClient(QObject):
         def on_update_user_list(data):
             users = data.get('users', [])
             self._users = users
+            if self._desired_username and self._desired_username in users:
+                self._set_username(self._desired_username)
+            elif self._username and self._username not in users:
+                self._set_username("")
             self.usersUpdated.emit(self._users.copy())
+
+        @self._sio.on('error')
+        def on_error(data):
+            message = data.get('message', 'An unknown error occurred.')
+            self._notify_error(message)
+            if self._desired_username and self._desired_username == self._username:
+                # Preserve desired username for reconnection attempts but allow UI edits
+                self._set_username("")
+            lowered = message.lower()
+            if self._desired_username and 'username' in lowered:
+                self._desired_username = ""
 
     def _ensure_connected(self):
         # use a lock to prevent race conditions on state flags
@@ -78,45 +108,65 @@ class ChatClient(QObject):
                 print("Connection error:", e)
                 # if connect fails, reset the flag so we can try again
                 self._connecting = False
+                self._notify_error(f"Connection error: {e}")
         
         t = threading.Thread(target=_connect, daemon=True)
         t.start()
 
-    def _emit_when_connected(self, event, data, timeout=5.0):
-        # emit in background once connected (non-blocking for UI)
-        def _worker():
-            waited = 0.0
-            interval = 0.05
-            while waited < timeout:
-                if self._connected:
-                    try:
-                        self._sio.emit(event, data)
-                        return
-                    except Exception as e:
-                        print(f"Emit {event} failed:", e)
-                        return
-                time.sleep(interval)
-                waited += interval
-            print(f"Emit {event} timeout (not connected).")
-        threading.Thread(target=_worker, daemon=True).start()
+    def _emit_when_connected(self, event, data):
+        send_immediately = False
+        with self._pending_lock:
+            if self._connected:
+                send_immediately = True
+            else:
+                self._pending_events.append((event, data))
+        if send_immediately:
+            try:
+                self._sio.emit(event, data)
+            except Exception as exc:
+                self._notify_error(f"Failed to send '{event}': {exc}")
+        else:
+            self._ensure_connected()
+
+    def _notify_error(self, message: str):
+        print("Error:", message)
+        self.errorReceived.emit(message)
+
+    def _set_username(self, value: str):
+        value = value or ""
+        if self._username != value:
+            self._username = value
+            self.usernameChanged.emit(self._username)
 
     @Slot(str)
     def register(self, username: str):
-        self._username = username
-        self._ensure_connected()
-        # emit once connected (non-blocking)
-        self._emit_when_connected('register', {'username': username})
+        desired = (username or "").strip()
+        if not desired:
+            self._notify_error("Username cannot be empty.")
+            return
+        self._desired_username = desired
+        self._emit_when_connected('register', {'username': desired})
 
     @Slot(str)
     def sendMessage(self, message: str):
-        self._ensure_connected()
-        self._emit_when_connected('message', {'message': message})
+        text = (message or "").strip()
+        if not text:
+            self._notify_error("Cannot send an empty message.")
+            return
+        self._emit_when_connected('message', {'message': text})
 
     @Slot(str, str)
     def sendPrivateMessage(self, recipient: str, message: str):
         """Sends a message to a specific user."""
-        self._ensure_connected()
-        payload = {'recipient': recipient, 'message': message}
+        recip = (recipient or "").strip()
+        text = (message or "").strip()
+        if not recip:
+            self._notify_error("Recipient is required for private messages.")
+            return
+        if not text:
+            self._notify_error("Cannot send an empty private message.")
+            return
+        payload = {'recipient': recip, 'message': text}
         self._emit_when_connected('private_message', payload)
 
     @Slot()
@@ -126,6 +176,13 @@ class ChatClient(QObject):
                 self._sio.disconnect()
         except Exception:
             pass
+        finally:
+            self._desired_username = ""
+
+    def _get_username(self):
+        return self._username
+
+    username = Property(str, _get_username, notify=usernameChanged)
 
 def main():
     app = QGuiApplication(sys.argv)

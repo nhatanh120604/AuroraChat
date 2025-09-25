@@ -155,23 +155,21 @@ class TestChatServer(unittest.TestCase):
         temp_client = socketio.Client()
         temp_client.connect("http://localhost:5001")
         temp_client.emit("register", {"username": "leaving_user"})
-        time.sleep(0.1)  # Allow server to process and broadcast the update
 
         # Wait for the main client to get the updated list
-        self.event_received.clear()
-        user_list_events = self.wait_for_event("update_user_list")
+        self.received_events.pop("update_user_list", None)
+        user_list_events = self.wait_for_event("update_user_list", timeout=2.0)
         self.assertIsNotNone(user_list_events)
         # The list should now contain both users
         self.assertIn("staying_user", user_list_events[-1][0]["users"])
         self.assertIn("leaving_user", user_list_events[-1][0]["users"])
 
         # Disconnect the temporary client
-        self.event_received.clear()
         temp_client.disconnect()
-        time.sleep(0.1)  # Allow server to process disconnect and broadcast
 
         # Wait for the main client to get the final list
-        final_list_events = self.wait_for_event("update_user_list")
+        self.received_events.pop("update_user_list", None)
+        final_list_events = self.wait_for_event("update_user_list", timeout=2.0)
         self.assertIsNotNone(
             final_list_events, "Did not receive final user list update."
         )
