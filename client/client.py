@@ -1,6 +1,7 @@
 import sys
 import os
 import threading
+from typing import Optional
 import socketio
 from PySide6.QtCore import QObject, Signal, Slot, QUrl, Property
 from PySide6.QtGui import QGuiApplication
@@ -9,7 +10,11 @@ from PySide6.QtQml import QQmlApplicationEngine
 
 class ChatClient(QObject):
     messageReceived = Signal(str, str)  # username, message
-    privateMessageReceived = Signal(str, str, str)  # sender, recipient, message
+    privateMessageReceived = Signal(str, str, str, int, str)  # sender, recipient, message, message_id, status
+    privateMessageSent = Signal(str, str, str, int, str)  # sender, recipient, message, message_id, status
+    privateMessageRead = Signal(int)  # message_id
+    publicTypingReceived = Signal(str, bool)  # username, is typing
+    privateTypingReceived = Signal(str, bool)  # username, is typing
     usersUpdated = Signal("QVariant")  # list of usernames
     disconnected = Signal()  # Signal to notify QML of disconnection
     errorReceived = Signal(str)  # Notify UI about errors
@@ -29,6 +34,8 @@ class ChatClient(QObject):
         self._pending_lock = threading.Lock()
         self._pending_events = []
         self._history_synced = False
+        self._public_typing_flag = False
+        self._private_typing_flags = {}
         self._setup_handlers()
 
     def _setup_handlers(self):
@@ -59,6 +66,8 @@ class ChatClient(QObject):
             self._connecting = False
             self._users = []
             self._pending_events.clear()
+            self._public_typing_flag = False
+            self._private_typing_flags.clear()
             self.usersUpdated.emit([])
             self._set_username("")
             self.disconnected.emit()  # Notify the UI
@@ -75,7 +84,53 @@ class ChatClient(QObject):
             sender = data.get("sender", "Unknown")
             recipient = data.get("recipient", "Unknown")
             message = data.get("message", "")
-            self.privateMessageReceived.emit(sender, recipient, message)
+            message_id = data.get("message_id")
+            status = data.get("status", "")
+            try:
+                message_id = int(message_id)
+            except (TypeError, ValueError):
+                message_id = 0
+            self.privateMessageReceived.emit(
+                sender, recipient, message, message_id, status
+            )
+
+        @self._sio.on("private_message_sent")
+        def on_private_message_sent(data):
+            sender = data.get("sender", "Unknown")
+            recipient = data.get("recipient", "Unknown")
+            message = data.get("message", "")
+            status = data.get("status", "")
+            message_id = data.get("message_id")
+            try:
+                message_id = int(message_id)
+            except (TypeError, ValueError):
+                message_id = 0
+            self.privateMessageSent.emit(
+                sender, recipient, message, message_id, status
+            )
+
+        @self._sio.on("private_message_read")
+        def on_private_message_read(data):
+            message_id = data.get("message_id")
+            try:
+                message_id = int(message_id)
+            except (TypeError, ValueError):
+                return
+            self.privateMessageRead.emit(message_id)
+
+        @self._sio.on("public_typing")
+        def on_public_typing(data):
+            username = data.get("username")
+            is_typing = bool(data.get("is_typing"))
+            if username:
+                self.publicTypingReceived.emit(username, is_typing)
+
+        @self._sio.on("private_typing")
+        def on_private_typing(data):
+            username = data.get("username")
+            is_typing = bool(data.get("is_typing"))
+            if username:
+                self.privateTypingReceived.emit(username, is_typing)
 
         # Replaced user_joined with update_user_list to sync with server
         @self._sio.on("update_user_list")
@@ -204,6 +259,53 @@ class ChatClient(QObject):
             pass
         finally:
             self._desired_username = ""
+
+    def _send_typing_state(
+        self, context: str, is_typing: bool, recipient: Optional[str] = None
+    ):
+        payload = {"context": context, "is_typing": bool(is_typing)}
+        if recipient:
+            payload["recipient"] = recipient
+        self._emit_when_connected("typing", payload)
+
+    @Slot(bool)
+    def indicatePublicTyping(self, is_typing: bool):
+        state = bool(is_typing)
+        if self._public_typing_flag == state:
+            return
+        self._public_typing_flag = state
+        self._send_typing_state("public", state)
+
+    @Slot(str, bool)
+    def indicatePrivateTyping(self, recipient: str, is_typing: bool):
+        recip = (recipient or "").strip()
+        if not recip:
+            return
+        state = bool(is_typing)
+        previous = self._private_typing_flags.get(recip)
+        if previous == state:
+            return
+        if state:
+            self._private_typing_flags[recip] = True
+        else:
+            self._private_typing_flags.pop(recip, None)
+        self._send_typing_state("private", state, recip)
+
+    @Slot(str, "QVariantList")
+    def markPrivateMessagesRead(self, recipient: str, message_ids):
+        recip = (recipient or "").strip()
+        if not recip or not message_ids:
+            return
+        sanitized = []
+        for mid in message_ids:
+            try:
+                sanitized.append(int(mid))
+            except (TypeError, ValueError):
+                continue
+        if not sanitized:
+            return
+        payload = {"recipient": recip, "message_ids": sanitized}
+        self._emit_when_connected("private_message_read", payload)
 
     def _get_username(self):
         return self._username

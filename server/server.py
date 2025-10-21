@@ -27,6 +27,8 @@ class ChatServer:
         self.test = test
         self.lock = threading.Lock()  # Lock for thread-safe operations on clients dict
         self.public_history = []
+        self.private_message_counter = 0
+        self.private_messages = {}
 
         self.register_events()
 
@@ -182,6 +184,15 @@ class ChatServer:
                             break
 
                 if recipient_sid:
+                    with self.lock:
+                        self.private_message_counter += 1
+                        message_id = self.private_message_counter
+                        self.private_messages[message_id] = {
+                            "sender_sid": sid,
+                            "recipient_sid": recipient_sid,
+                            "status": "sent",
+                        }
+
                     # Send private message to recipient only
                     payload = {
                         "sender": sender_username,
@@ -192,7 +203,16 @@ class ChatServer:
                     if "timestamp" in data:
                         payload["timestamp"] = data["timestamp"]
 
-                    self.sio.emit("private_message_received", payload, to=recipient_sid)
+                    payload["message_id"] = message_id
+                    recipient_payload = dict(payload)
+                    recipient_payload["status"] = "delivered"
+                    sender_payload = dict(payload)
+                    sender_payload["status"] = "sent"
+
+                    self.sio.emit(
+                        "private_message_received", recipient_payload, to=recipient_sid
+                    )
+                    self.sio.emit("private_message_sent", sender_payload, to=sid)
                     logging.info(
                         f"Private message delivered from {sender_username} to {recipient_username}"
                     )
@@ -226,6 +246,90 @@ class ChatServer:
             with self.lock:
                 history_snapshot = list(self.public_history)
             self.sio.emit("chat_history", {"messages": history_snapshot}, to=sid)
+
+        @self.sio.event
+        def typing(sid, data):
+            with self.lock:
+                username = self.clients.get(sid)
+
+            if not username:
+                logging.warning("Typing event from unknown SID: %s", sid)
+                return
+
+            context = data.get("context")
+            is_typing = bool(data.get("is_typing"))
+
+            if context == "public":
+                self.sio.emit(
+                    "public_typing",
+                    {"username": username, "is_typing": is_typing},
+                    skip_sid=sid,
+                )
+            elif context == "private":
+                recipient_username = data.get("recipient")
+                if not recipient_username:
+                    return
+
+                recipient_sid = None
+                with self.lock:
+                    for client_sid, name in self.clients.items():
+                        if name == recipient_username:
+                            recipient_sid = client_sid
+                            break
+
+                if recipient_sid:
+                    self.sio.emit(
+                        "private_typing",
+                        {"username": username, "is_typing": is_typing},
+                        to=recipient_sid,
+                    )
+            else:
+                logging.debug(
+                    "Ignoring typing event with invalid context '%s' from %s",
+                    context,
+                    username,
+                )
+
+        @self.sio.event
+        def private_message_read(sid, data):
+            message_ids = data.get("message_ids")
+            if message_ids is None:
+                return
+
+            if not isinstance(message_ids, list):
+                message_ids = [message_ids]
+
+            acknowledgements = []
+
+            with self.lock:
+                for raw_id in message_ids:
+                    try:
+                        message_id = int(raw_id)
+                    except (TypeError, ValueError):
+                        continue
+
+                    message_meta = self.private_messages.get(message_id)
+                    if not message_meta:
+                        continue
+
+                    if message_meta.get("recipient_sid") != sid:
+                        continue
+
+                    if message_meta.get("status") == "seen":
+                        continue
+
+                    message_meta["status"] = "seen"
+                    acknowledgements.append(
+                        (message_meta.get("sender_sid"), message_id)
+                    )
+
+            for sender_sid, message_id in acknowledgements:
+                if sender_sid:
+                    self.sio.emit(
+                        "private_message_read",
+                        {"message_id": message_id},
+                        to=sender_sid,
+                    )
 
 
 if __name__ == "__main__":

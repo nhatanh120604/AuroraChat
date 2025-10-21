@@ -41,6 +41,10 @@ ApplicationWindow {
     property string publicDraft: ""
     property var conversationPages: ({})
     property int totalUserCount: 0
+    property var publicTypingUsers: []
+    property string publicTypingText: ""
+    property var privateTypingStates: ({})
+    property var messageIndexById: ({})
 
     function ensurePrivateModel(peer) {
         if (!peer) {
@@ -59,6 +63,107 @@ ApplicationWindow {
             }
         }
         return -1
+    }
+
+    function buildPublicTypingText(list) {
+        if (!list || list.length === 0) {
+            return ""
+        }
+        if (list.length === 1) {
+            return list[0] + " is typing..."
+        }
+        if (list.length === 2) {
+            return list[0] + " and " + list[1] + " are typing..."
+        }
+        return list[0] + ", " + list[1] + " and others are typing..."
+    }
+
+    function updatePublicTyping(username, isTyping) {
+        if (!username || username.length === 0 || username === chatClient.username) {
+            return
+        }
+        var current = publicTypingUsers.slice()
+        var index = current.indexOf(username)
+        if (isTyping && index === -1) {
+            current.push(username)
+        } else if (!isTyping && index !== -1) {
+            current.splice(index, 1)
+        }
+        publicTypingUsers = current
+        publicTypingText = buildPublicTypingText(current)
+    }
+
+    function updatePrivateTyping(peer, isTyping) {
+        if (!peer || peer.length === 0) {
+            return
+        }
+        var snapshot = Object.assign({}, privateTypingStates)
+        if (isTyping) {
+            snapshot[peer] = true
+        } else if (snapshot[peer]) {
+            delete snapshot[peer]
+        }
+        privateTypingStates = snapshot
+    }
+
+    function setPrivateMessageStatusById(messageId, status) {
+        if (!messageId || messageId <= 0) {
+            return
+        }
+        var target = messageIndexById[messageId]
+        if (target) {
+            var model = privateMessageModels[target.peer]
+            if (model && target.index < model.count) {
+                model.setProperty(target.index, "status", status)
+                return
+            }
+        }
+        var peers = Object.keys(privateMessageModels)
+        for (var i = 0; i < peers.length; ++i) {
+            var peer = peers[i]
+            var model = privateMessageModels[peer]
+            if (!model) {
+                continue
+            }
+            for (var j = 0; j < model.count; ++j) {
+                var row = model.get(j)
+                if (row && row.messageId === messageId) {
+                    model.setProperty(j, "status", status)
+                    var updated = Object.assign({}, messageIndexById)
+                    updated[messageId] = {"peer": peer, "index": j}
+                    messageIndexById = updated
+                    return
+                }
+            }
+        }
+    }
+
+    function markPrivateMessagesAsRead(peer) {
+        if (!peer || peer.length === 0) {
+            return
+        }
+        var model = privateMessageModels[peer]
+        if (!model) {
+            return
+        }
+        var ids = []
+        for (var i = 0; i < model.count; ++i) {
+            var entry = model.get(i)
+            if (!entry || entry.isOutgoing === true) {
+                continue
+            }
+            if (!entry.messageId || entry.messageId <= 0) {
+                continue
+            }
+            if (entry.readNotified === true) {
+                continue
+            }
+            ids.push(entry.messageId)
+            model.setProperty(i, "readNotified", true)
+        }
+        if (ids.length > 0) {
+            chatClient.markPrivateMessagesRead(peer, ids)
+        }
     }
 
     function setConversationUnread(key, unread) {
@@ -91,8 +196,12 @@ ApplicationWindow {
         if (index < 0 || index >= conversationTabsModel.count) {
             return
         }
-        var key = conversationTabsModel.get(index).key
+        var tab = conversationTabsModel.get(index)
+        var key = tab.key
         setConversationUnread(key, false)
+        if (tab.isPrivate === true) {
+            markPrivateMessagesAsRead(key)
+        }
         focusActiveComposer()
         var page = conversationPages[key]
         if (page && page.scrollToEnd) {
@@ -100,7 +209,7 @@ ApplicationWindow {
         }
     }
 
-    function appendPrivateMessage(peer, author, text, isOutgoing) {
+    function appendPrivateMessage(peer, author, text, isOutgoing, messageId, status) {
         if (!peer || !text || text.length === 0) {
             return
         }
@@ -114,17 +223,30 @@ ApplicationWindow {
         if (conversationIndex(peer) === -1) {
             conversationTabsModel.append({"key": peer, "title": peer, "isPrivate": true, "hasUnread": false})
         }
+        var resolvedStatus = status && status.length > 0 ? status : (isOutgoing === true ? "sent" : "delivered")
+        var resolvedId = messageId && messageId > 0 ? messageId : 0
         model.append({
             "user": author,
             "text": text,
             "isPrivate": true,
             "isOutgoing": isOutgoing === true,
-            "displayContext": isOutgoing === true ? "You" : author
+            "displayContext": isOutgoing === true ? "You" : author,
+            "status": resolvedStatus,
+            "messageId": resolvedId,
+            "readNotified": isOutgoing === true
         })
+        var newIndex = model.count - 1
+        if (resolvedId > 0) {
+            var mapping = Object.assign({}, messageIndexById)
+            mapping[resolvedId] = {"peer": peer, "index": newIndex}
+            messageIndexById = mapping
+        }
         var idx = conversationIndex(peer)
         var isActive = idx === conversationTabBar.currentIndex
         if (!isActive && isOutgoing !== true) {
             setConversationUnread(peer, true)
+        } else if (isActive && isOutgoing !== true) {
+            markPrivateMessagesAsRead(peer)
         }
         var page = conversationPages[peer]
         if (page && page.scrollToEnd) {
@@ -176,6 +298,10 @@ ApplicationWindow {
         privateDrafts = ({})
         publicDraft = ""
         conversationPages = ({})
+        privateTypingStates = ({})
+        messageIndexById = ({})
+        publicTypingUsers = []
+        publicTypingText = ""
         while (conversationTabsModel.count > 1) {
             conversationTabsModel.remove(conversationTabsModel.count - 1)
         }
@@ -870,6 +996,7 @@ ApplicationWindow {
 
             function setup() {
                 messageField.text = window.publicDraft || ""
+                publicTypingTimer.stop()
                 scrollArea.scrollToEnd(false)
             }
 
@@ -879,6 +1006,13 @@ ApplicationWindow {
 
             function forceComposerFocus() {
                 messageField.forceActiveFocus()
+            }
+
+            Timer {
+                id: publicTypingTimer
+                interval: 2000
+                repeat: false
+                onTriggered: chatClient.indicatePublicTyping(false)
             }
 
             RowLayout {
@@ -1000,6 +1134,14 @@ ApplicationWindow {
                 }
             }
 
+            Text {
+                Layout.fillWidth: true
+                text: window.publicTypingText
+                color: palette.textSecondary
+                font.pixelSize: 12
+                visible: text && text.length > 0
+            }
+
             Rectangle {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 84
@@ -1098,10 +1240,19 @@ ApplicationWindow {
                                 } else {
                                     rippleAnimator.stop()
                                     messageFieldFrame.rippleProgress = 0
+                                    chatClient.indicatePublicTyping(false)
+                                    publicTypingTimer.stop()
                                 }
                             }
                             onTextChanged: {
                                 window.publicDraft = text
+                                if (text.length > 0) {
+                                    chatClient.indicatePublicTyping(true)
+                                    publicTypingTimer.restart()
+                                } else {
+                                    chatClient.indicatePublicTyping(false)
+                                    publicTypingTimer.stop()
+                                }
                             }
                         }
                     }
@@ -1162,6 +1313,8 @@ ApplicationWindow {
                                 chatClient.sendMessage(text)
                                 messageField.text = ""
                                 window.publicDraft = ""
+                                chatClient.indicatePublicTyping(false)
+                                publicTypingTimer.stop()
                                 scrollArea.scrollToEnd(true)
                             }
                         }
@@ -1188,6 +1341,7 @@ ApplicationWindow {
                 displayName = title || key || ""
                 conversationModel = model
                 messageField.text = window.privateDrafts[peerKey] || ""
+                privateTypingTimer.stop()
                 scrollArea.scrollToEnd(false)
             }
 
@@ -1197,6 +1351,17 @@ ApplicationWindow {
 
             function forceComposerFocus() {
                 messageField.forceActiveFocus()
+            }
+
+            Timer {
+                id: privateTypingTimer
+                interval: 2000
+                repeat: false
+                onTriggered: {
+                    if (peerKey.length > 0) {
+                        chatClient.indicatePrivateTyping(peerKey, false)
+                    }
+                }
             }
 
             RowLayout {
@@ -1225,6 +1390,14 @@ ApplicationWindow {
                     Layout.alignment: Qt.AlignVCenter
                     wrapMode: Text.WordWrap
                 }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: peerKey.length > 0 && window.privateTypingStates[peerKey] ? peerKey + " is typing..." : ""
+                color: palette.textSecondary
+                font.pixelSize: 12
+                visible: text.length > 0
             }
 
             Flickable {
@@ -1416,11 +1589,22 @@ ApplicationWindow {
                                 } else {
                                     privateRippleAnimator.stop()
                                     privateMessageFieldFrame.rippleProgress = 0
+                                    if (peerKey.length > 0) {
+                                        chatClient.indicatePrivateTyping(peerKey, false)
+                                        privateTypingTimer.stop()
+                                    }
                                 }
                             }
                             onTextChanged: {
                                 if (peerKey.length > 0) {
                                     window.privateDrafts[peerKey] = text
+                                    if (text.length > 0) {
+                                        chatClient.indicatePrivateTyping(peerKey, true)
+                                        privateTypingTimer.restart()
+                                    } else {
+                                        chatClient.indicatePrivateTyping(peerKey, false)
+                                        privateTypingTimer.stop()
+                                    }
                                 }
                             }
                         }
@@ -1482,11 +1666,11 @@ ApplicationWindow {
                             var text = messageField.text.trim()
                             if (text.length > 0) {
                                 chatClient.sendPrivateMessage(peerKey, text)
-                                window.appendPrivateMessage(peerKey, chatClient.username.length > 0 ? chatClient.username : "You", text, true)
                                 messageField.text = ""
                                 window.privateDrafts[peerKey] = ""
                                 window.setConversationUnread(peerKey, false)
-                                scrollArea.scrollToEnd(true)
+                                chatClient.indicatePrivateTyping(peerKey, false)
+                                privateTypingTimer.stop()
                             }
                         }
                     }
@@ -1585,14 +1769,43 @@ ApplicationWindow {
                     }
                 }
 
-                Text {
-                    text: model.text
-                    color: palette.textPrimary
-                    wrapMode: Text.Wrap
+                Column {
                     anchors.fill: parent
                     anchors.margins: 20
-                    font.pixelSize: 15
-                    lineHeight: 1.35
+                    spacing: 6
+
+                    Text {
+                        text: model.text
+                        color: palette.textPrimary
+                        wrapMode: Text.Wrap
+                        width: parent.width
+                        font.pixelSize: 15
+                        lineHeight: 1.35
+                    }
+
+                    Text {
+                        width: parent.width
+                        color: palette.textSecondary
+                        font.pixelSize: 11
+                        horizontalAlignment: Text.AlignRight
+                        text: {
+                            if (!model.isPrivate || model.isOutgoing !== true) {
+                                return ""
+                            }
+                            var state = model.status ? model.status.toLowerCase() : ""
+                            if (state === "seen") {
+                                return "\u2713\u2713 Seen"
+                            }
+                            if (state === "delivered") {
+                                return "\u2713 Delivered"
+                            }
+                            if (state === "sent") {
+                                return "\u2713 Sent"
+                            }
+                            return ""
+                        }
+                        visible: text && text.length > 0
+                    }
                 }
             }
         }
@@ -1779,14 +1992,38 @@ ApplicationWindow {
             }
         }
 
-        function onPrivateMessageReceived(sender, recipient, message) {
+        function onPrivateMessageReceived(sender, recipient, message, messageId, status) {
             var currentUser = chatClient.username
             var isOutgoing = sender === currentUser
             var peer = isOutgoing ? recipient : sender
             if (!peer || peer.length === 0) {
                 return
             }
-            window.appendPrivateMessage(peer, sender, message, isOutgoing)
+            window.appendPrivateMessage(peer, sender, message, isOutgoing, messageId, status)
+            if (!isOutgoing) {
+                window.updatePrivateTyping(sender, false)
+            }
+        }
+
+        function onPrivateMessageSent(sender, recipient, message, messageId, status) {
+            var peer = recipient
+            if (!peer || peer.length === 0) {
+                return
+            }
+            window.appendPrivateMessage(peer, sender, message, true, messageId, status)
+            window.setConversationUnread(peer, false)
+        }
+
+        function onPrivateMessageRead(messageId) {
+            window.setPrivateMessageStatusById(messageId, "seen")
+        }
+
+        function onPublicTypingReceived(username, isTyping) {
+            window.updatePublicTyping(username, isTyping)
+        }
+
+        function onPrivateTypingReceived(username, isTyping) {
+            window.updatePrivateTyping(username, isTyping)
         }
 
         function onUsersUpdated(users) {
@@ -1797,6 +2034,23 @@ ApplicationWindow {
                     usersModel.append({"name": users[i]})
                 }
             }
+            var filteredPublic = []
+            for (var j = 0; j < window.publicTypingUsers.length; ++j) {
+                var name = window.publicTypingUsers[j]
+                if (users.indexOf(name) !== -1) {
+                    filteredPublic.push(name)
+                }
+            }
+            window.publicTypingUsers = filteredPublic
+            window.publicTypingText = window.buildPublicTypingText(filteredPublic)
+            var refreshedPrivate = {}
+            for (var k = 0; k < users.length; ++k) {
+                var user = users[k]
+                if (window.privateTypingStates[user]) {
+                    refreshedPrivate[user] = true
+                }
+            }
+            window.privateTypingStates = refreshedPrivate
         }
 
         function onDisconnected() {
