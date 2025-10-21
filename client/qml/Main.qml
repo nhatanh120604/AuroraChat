@@ -2,6 +2,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Effects 6.6
+import Qt.labs.platform 1.1 as Platform
 
 
 ApplicationWindow {
@@ -45,6 +46,9 @@ ApplicationWindow {
     property string publicTypingText: ""
     property var privateTypingStates: ({})
     property var messageIndexById: ({})
+    property var emojiOptions: ["😀", "😂", "😍", "😎", "👍", "🙏", "🎉", "❤️", "🔥", "🤔", "🥳", "🤩", "😢", "😡"]
+    property var publicPendingFile: null
+    property var privatePendingFiles: ({})
 
     function ensurePrivateModel(peer) {
         if (!peer) {
@@ -104,6 +108,30 @@ ApplicationWindow {
             delete snapshot[peer]
         }
         privateTypingStates = snapshot
+    }
+
+    function insertEmojiIntoField(field, emoji) {
+        if (!field || !emoji || emoji.length === 0) {
+            return
+        }
+        var cursor = field.cursorPosition
+        var current = field.text || ""
+        field.text = current.slice(0, cursor) + emoji + current.slice(cursor)
+        field.cursorPosition = cursor + emoji.length
+    }
+
+    function formatFileSize(bytes) {
+        var value = Number(bytes)
+        if (!value || isNaN(value) || value <= 0) {
+            return ""
+        }
+        if (value < 1024) {
+            return value + " B"
+        }
+        if (value < 1024 * 1024) {
+            return (value / 1024).toFixed(1) + " KB"
+        }
+        return (value / (1024 * 1024)).toFixed(1) + " MB"
     }
 
     function setPrivateMessageStatusById(messageId, status) {
@@ -173,6 +201,26 @@ ApplicationWindow {
         }
     }
 
+    function setPrivatePendingFile(peer, info) {
+        if (!peer || peer.length === 0) {
+            return
+        }
+        var snapshot = Object.assign({}, privatePendingFiles)
+        if (info) {
+            snapshot[peer] = info
+        } else if (snapshot.hasOwnProperty(peer)) {
+            delete snapshot[peer]
+        }
+        privatePendingFiles = snapshot
+    }
+
+    function getPrivatePendingFile(peer) {
+        if (!peer || peer.length === 0) {
+            return null
+        }
+        return privatePendingFiles[peer] ? privatePendingFiles[peer] : null
+    }
+
     function registerConversationPage(key, page) {
         conversationPages[key] = page
     }
@@ -209,9 +257,15 @@ ApplicationWindow {
         }
     }
 
-    function appendPrivateMessage(peer, author, text, isOutgoing, messageId, status) {
-        if (!peer || !text || text.length === 0) {
+    function appendPrivateMessage(peer, author, text, isOutgoing, messageId, status, filePayload) {
+        if (!peer || peer.length === 0) {
             return
+        }
+        text = text || ""
+        if (text.length === 0) {
+            if (!filePayload || !filePayload.name || !filePayload.data) {
+                return
+            }
         }
         if (!author || author.length === 0) {
             author = isOutgoing === true ? (chatClient.username && chatClient.username.length > 0 ? chatClient.username : "You") : peer
@@ -225,6 +279,11 @@ ApplicationWindow {
         }
         var resolvedStatus = status && status.length > 0 ? status : (isOutgoing === true ? "sent" : "delivered")
         var resolvedId = messageId && messageId > 0 ? messageId : 0
+        var fileInfo = filePayload ? filePayload : null
+        var fileName = fileInfo && fileInfo.name ? fileInfo.name : ""
+        var fileMime = fileInfo && fileInfo.mime ? fileInfo.mime : ""
+        var fileData = fileInfo && fileInfo.data ? fileInfo.data : ""
+        var fileSize = fileInfo && fileInfo.size ? Number(fileInfo.size) : 0
         model.append({
             "user": author,
             "text": text,
@@ -233,7 +292,11 @@ ApplicationWindow {
             "displayContext": isOutgoing === true ? "You" : author,
             "status": resolvedStatus,
             "messageId": resolvedId,
-            "readNotified": isOutgoing === true
+            "readNotified": isOutgoing === true,
+            "fileName": fileName,
+            "fileMime": fileMime,
+            "fileData": fileData,
+            "fileSize": fileSize
         })
         var newIndex = model.count - 1
         if (resolvedId > 0) {
@@ -273,6 +336,7 @@ ApplicationWindow {
         var idx = conversationIndex(peer)
         if (idx > 0) {
             var wasCurrent = conversationTabBar.currentIndex === idx
+            setPrivatePendingFile(peer, null)
             conversationTabsModel.remove(idx)
             unregisterConversationPage(peer)
             var targetIndex = conversationTabBar.currentIndex
@@ -302,6 +366,8 @@ ApplicationWindow {
         messageIndexById = ({})
         publicTypingUsers = []
         publicTypingText = ""
+        publicPendingFile = null
+        privatePendingFiles = ({})
         while (conversationTabsModel.count > 1) {
             conversationTabsModel.remove(conversationTabsModel.count - 1)
         }
@@ -1015,6 +1081,43 @@ ApplicationWindow {
                 onTriggered: chatClient.indicatePublicTyping(false)
             }
 
+            Menu {
+                id: publicEmojiMenu
+                Repeater {
+                    model: window.emojiOptions
+                    delegate: MenuItem {
+                        text: modelData
+                        onTriggered: {
+                            window.insertEmojiIntoField(messageField, modelData)
+                            messageField.forceActiveFocus()
+                        }
+                    }
+                }
+            }
+
+            Platform.FileDialog {
+                id: publicFileDialog
+                title: "Select a file to share"
+                onAccepted: {
+                    var target = ""
+                    if (publicFileDialog.file && publicFileDialog.file.toString) {
+                        target = publicFileDialog.file.toString()
+                    } else if (publicFileDialog.file) {
+                        target = String(publicFileDialog.file)
+                    } else if (publicFileDialog.files && publicFileDialog.files.length > 0) {
+                        var candidate = publicFileDialog.files[0]
+                        target = candidate && candidate.toString ? candidate.toString() : String(candidate)
+                    }
+                    if (target.length > 0) {
+                        var meta = chatClient.inspectFile(target)
+                        if (meta && meta.path) {
+                            window.publicPendingFile = meta
+                            messageField.forceActiveFocus()
+                        }
+                    }
+                }
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 12
@@ -1144,178 +1247,333 @@ ApplicationWindow {
 
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 84
                 radius: 22
                 color: window.palette.surface
                 border.color: window.palette.outline
                 border.width: 1
+                implicitHeight: composerContent.implicitHeight + 36
 
-                RowLayout {
+                ColumnLayout {
+                    id: composerContent
                     anchors.fill: parent
                     anchors.margins: 18
-                    spacing: 16
+                    spacing: 12
 
-                    Rectangle {
-                        id: messageFieldFrame
+                    RowLayout {
+                        id: publicComposerRow
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 48
-                        radius: 16
-                        color: window.palette.canvas
-                        border.color: messageField.activeFocus ? window.palette.accent : window.palette.outline
-                        border.width: 1
-                        property real rippleProgress: 0
-                        Behavior on border.color {
-                            ColorAnimation {
-                                duration: 180
-                                easing.type: Easing.OutQuad
-                            }
-                        }
+                        spacing: 16
 
                         Rectangle {
-                            id: rippleOverlay
-                            anchors.fill: parent
-                            radius: parent.radius
-                            color: "transparent"
-                            border.width: 0
-                            opacity: messageField.activeFocus ? 0.35 : 0.0
-                            visible: opacity > 0
-                            gradient: Gradient {
-                                GradientStop {
-                                    position: Math.max(0.0, messageFieldFrame.rippleProgress - 0.2)
-                                    color: "#00FFFFFF"
-                                }
-                                GradientStop {
-                                    position: Math.max(0.0, Math.min(1.0, messageFieldFrame.rippleProgress))
-                                    color: window.palette.accent
-                                }
-                                GradientStop {
-                                    position: Math.min(1.0, messageFieldFrame.rippleProgress + 0.2)
-                                    color: "#00FFFFFF"
-                                }
-                            }
-                            Behavior on opacity {
-                                NumberAnimation {
-                                    duration: 220
+                            id: messageFieldFrame
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 48
+                            radius: 16
+                            color: window.palette.canvas
+                            border.color: messageField.activeFocus ? window.palette.accent : window.palette.outline
+                            border.width: 1
+                            property real rippleProgress: 0
+                            Behavior on border.color {
+                                ColorAnimation {
+                                    duration: 180
                                     easing.type: Easing.OutQuad
                                 }
                             }
-                        }
 
-                        NumberAnimation {
-                            id: rippleAnimator
-                            target: messageFieldFrame
-                            property: "rippleProgress"
-                            from: 0
-                            to: 1
-                            duration: 520
-                            easing.type: Easing.OutQuad
-                        }
-
-                        TextField {
-                            id: messageField
-                            anchors.fill: parent
-                            leftPadding: 18
-                            rightPadding: 18
-                            topPadding: 12
-                            bottomPadding: 12
-                            placeholderText: "Share something with the lounge"
-                            placeholderTextColor: window.palette.textSecondary
-                            color: window.palette.textPrimary
-                            selectionColor: window.palette.accent
-                            selectedTextColor: window.palette.textPrimary
-                            verticalAlignment: Text.AlignVCenter
-                            font.pixelSize: 14
-                            wrapMode: Text.WordWrap
-                            cursorDelegate: Rectangle {
-                                width: 2
-                                color: window.palette.accent
-                            }
-                            background: null
-                            selectByMouse: true
-                            onAccepted: sendButton.clicked()
-                            onActiveFocusChanged: {
-                                if (activeFocus) {
-                                    messageFieldFrame.rippleProgress = 0
-                                    rippleAnimator.restart()
-                                } else {
-                                    rippleAnimator.stop()
-                                    messageFieldFrame.rippleProgress = 0
-                                    chatClient.indicatePublicTyping(false)
-                                    publicTypingTimer.stop()
+                            Rectangle {
+                                id: rippleOverlay
+                                anchors.fill: parent
+                                radius: parent.radius
+                                color: "transparent"
+                                border.width: 0
+                                opacity: messageField.activeFocus ? 0.35 : 0.0
+                                visible: opacity > 0
+                                gradient: Gradient {
+                                    GradientStop {
+                                        position: Math.max(0.0, messageFieldFrame.rippleProgress - 0.2)
+                                        color: "#00FFFFFF"
+                                    }
+                                    GradientStop {
+                                        position: Math.max(0.0, Math.min(1.0, messageFieldFrame.rippleProgress))
+                                        color: window.palette.accent
+                                    }
+                                    GradientStop {
+                                        position: Math.min(1.0, messageFieldFrame.rippleProgress + 0.2)
+                                        color: "#00FFFFFF"
+                                    }
+                                }
+                                Behavior on opacity {
+                                    NumberAnimation {
+                                        duration: 220
+                                        easing.type: Easing.OutQuad
+                                    }
                                 }
                             }
-                            onTextChanged: {
-                                window.publicDraft = text
-                                if (text.length > 0) {
-                                    chatClient.indicatePublicTyping(true)
-                                    publicTypingTimer.restart()
-                                } else {
+
+                            NumberAnimation {
+                                id: rippleAnimator
+                                target: messageFieldFrame
+                                property: "rippleProgress"
+                                from: 0
+                                to: 1
+                                duration: 520
+                                easing.type: Easing.OutQuad
+                            }
+
+                            TextField {
+                                id: messageField
+                                anchors.fill: parent
+                                leftPadding: 18
+                                rightPadding: 18
+                                topPadding: 12
+                                bottomPadding: 12
+                                placeholderText: "Share something with the lounge"
+                                placeholderTextColor: window.palette.textSecondary
+                                color: window.palette.textPrimary
+                                selectionColor: window.palette.accent
+                                selectedTextColor: window.palette.textPrimary
+                                verticalAlignment: Text.AlignVCenter
+                                font.pixelSize: 14
+                                wrapMode: Text.WordWrap
+                                cursorDelegate: Rectangle {
+                                    width: 2
+                                    color: window.palette.accent
+                                }
+                                background: null
+                                selectByMouse: true
+                                onAccepted: sendButton.clicked()
+                                onActiveFocusChanged: {
+                                    if (activeFocus) {
+                                        messageFieldFrame.rippleProgress = 0
+                                        rippleAnimator.restart()
+                                    } else {
+                                        rippleAnimator.stop()
+                                        messageFieldFrame.rippleProgress = 0
+                                        chatClient.indicatePublicTyping(false)
+                                        publicTypingTimer.stop()
+                                    }
+                                }
+                                onTextChanged: {
+                                    window.publicDraft = text
+                                    if (text.length > 0) {
+                                        chatClient.indicatePublicTyping(true)
+                                        publicTypingTimer.restart()
+                                    } else {
+                                        chatClient.indicatePublicTyping(false)
+                                        publicTypingTimer.stop()
+                                    }
+                                }
+                            }
+                        }
+
+                        ToolButton {
+                            id: publicEmojiButton
+                            Layout.preferredWidth: 48
+                            Layout.preferredHeight: 48
+                            padding: 0
+                            focusPolicy: Qt.NoFocus
+                            property color baseColor: window.palette.canvas
+                            property color hoverColor: window.palette.surface
+                            property color activeColor: window.palette.accentSoft
+                            property color borderColor: window.palette.outline
+                            text: "😊"
+                            font.pixelSize: 20
+                            onClicked: {
+                                var pos = mapToItem(null, 0, height)
+                                publicEmojiMenu.x = pos.x
+                                publicEmojiMenu.y = pos.y
+                                publicEmojiMenu.open()
+                            }
+                            background: Rectangle {
+                                radius: 18
+                                color: publicEmojiButton.down ? publicEmojiButton.activeColor : (publicEmojiButton.hovered ? publicEmojiButton.hoverColor : publicEmojiButton.baseColor)
+                                border.width: 1
+                                border.color: publicEmojiButton.down || publicEmojiButton.hovered ? window.palette.accent : publicEmojiButton.borderColor
+                                Behavior on color {
+                                    ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+                                }
+                                Behavior on border.color {
+                                    ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+                                }
+                            }
+                            contentItem: Text {
+                                anchors.fill: parent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                text: publicEmojiButton.text
+                                color: window.palette.textPrimary
+                                font.pixelSize: publicEmojiButton.font.pixelSize
+                            }
+                        }
+
+                        ToolButton {
+                            id: publicFileButton
+                            Layout.preferredWidth: 48
+                            Layout.preferredHeight: 48
+                            padding: 0
+                            focusPolicy: Qt.NoFocus
+                            property color baseColor: window.palette.canvas
+                            property color hoverColor: window.palette.surface
+                            property color activeColor: window.palette.accentSoft
+                            property color borderColor: window.palette.outline
+                            text: "📎"
+                            font.pixelSize: 18
+                            onClicked: publicFileDialog.open()
+                            background: Rectangle {
+                                radius: 18
+                                color: publicFileButton.down ? publicFileButton.activeColor : (publicFileButton.hovered ? publicFileButton.hoverColor : publicFileButton.baseColor)
+                                border.width: 1
+                                border.color: publicFileButton.down || publicFileButton.hovered ? window.palette.accent : publicFileButton.borderColor
+                                Behavior on color {
+                                    ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+                                }
+                                Behavior on border.color {
+                                    ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+                                }
+                            }
+                            contentItem: Text {
+                                anchors.fill: parent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                text: publicFileButton.text
+                                color: window.palette.textPrimary
+                                font.pixelSize: publicFileButton.font.pixelSize
+                            }
+                        }
+
+                        Button {
+                            id: sendButton
+                            Layout.preferredWidth: 124
+                            Layout.preferredHeight: 48
+                            padding: 0
+                            topPadding: 0
+                            bottomPadding: 0
+                            leftPadding: 0
+                            rightPadding: 0
+                            transformOrigin: Item.Center
+                            scale: down ? 0.95 : (hovered ? 1.05 : 1.0)
+                            Behavior on scale {
+                                NumberAnimation {
+                                    duration: 160
+                                    easing.type: Easing.OutQuad
+                                }
+                            }
+                            background: Rectangle {
+                                id: sendBackground
+                                radius: 22
+                                border.width: 0
+                                gradient: Gradient {
+                                    GradientStop { position: 0.0; color: palette.accentBold }
+                                    GradientStop { position: 1.0; color: palette.accent }
+                                }
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: parent.radius
+                                    gradient: Gradient {
+                                        GradientStop { position: 0.0; color: "#40FFFFFF" }
+                                        GradientStop { position: 1.0; color: "#00FFFFFF" }
+                                    }
+                                    opacity: sendButton.down ? 0.55 : (sendButton.hovered ? 0.28 : 0.0)
+                                    Behavior on opacity {
+                                        NumberAnimation {
+                                            duration: 160
+                                            easing.type: Easing.OutQuad
+                                        }
+                                    }
+                                }
+                            }
+                            contentItem: Text {
+                                anchors.centerIn: parent
+                                text: "Send"
+                                color: palette.panel
+                                font.pixelSize: 15
+                                font.bold: true
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            onClicked: {
+                                var text = messageField.text.trim()
+                                var pendingPath = window.publicPendingFile && window.publicPendingFile.path ? window.publicPendingFile.path : ""
+                                if (text.length === 0 && pendingPath.length === 0) {
+                                    chatClient.sendMessageWithAttachment("", "")
+                                    return
+                                }
+                                chatClient.sendMessageWithAttachment(text, pendingPath)
+                                if (text.length > 0 || pendingPath.length > 0) {
+                                    messageField.text = ""
+                                    window.publicDraft = ""
+                                    window.publicPendingFile = null
                                     chatClient.indicatePublicTyping(false)
                                     publicTypingTimer.stop()
+                                    scrollArea.scrollToEnd(true)
                                 }
                             }
                         }
                     }
 
-                    Button {
-                        id: sendButton
-                        Layout.preferredWidth: 124
-                        Layout.preferredHeight: 48
-                        padding: 0
-                        topPadding: 0
-                        bottomPadding: 0
-                        leftPadding: 0
-                        rightPadding: 0
-                        transformOrigin: Item.Center
-                        scale: down ? 0.95 : (hovered ? 1.05 : 1.0)
-                        Behavior on scale {
-                            NumberAnimation {
-                                duration: 160
-                                easing.type: Easing.OutQuad
+                    Rectangle {
+                        id: publicAttachmentPreview
+                        Layout.fillWidth: true
+                        visible: window.publicPendingFile !== null
+                        radius: 14
+                        color: window.palette.canvas
+                        border.color: window.palette.outline
+                        border.width: 1
+                        implicitHeight: publicAttachmentRow.implicitHeight + 16
+
+                        RowLayout {
+                            id: publicAttachmentRow
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            spacing: 12
+
+                            Text {
+                                text: "📎"
+                                font.pixelSize: 20
+                                color: window.palette.accent
                             }
-                        }
-                        background: Rectangle {
-                            id: sendBackground
-                            radius: 22
-                            border.width: 0
-                            gradient: Gradient {
-                                GradientStop { position: 0.0; color: palette.accentBold }
-                                GradientStop { position: 1.0; color: palette.accent }
-                            }
-                            Rectangle {
-                                anchors.fill: parent
-                                radius: parent.radius
-                                gradient: Gradient {
-                                    GradientStop { position: 0.0; color: "#40FFFFFF" }
-                                    GradientStop { position: 1.0; color: "#00FFFFFF" }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+
+                                Text {
+                                    text: window.publicPendingFile ? window.publicPendingFile.name : ""
+                                    color: window.palette.textPrimary
+                                    font.pixelSize: 13
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
                                 }
-                                opacity: sendButton.down ? 0.55 : (sendButton.hovered ? 0.28 : 0.0)
-                                Behavior on opacity {
-                                    NumberAnimation {
-                                        duration: 160
-                                        easing.type: Easing.OutQuad
-                                    }
+
+                                Text {
+                                    text: window.publicPendingFile ? window.formatFileSize(window.publicPendingFile.size) : ""
+                                    color: window.palette.textSecondary
+                                    font.pixelSize: 11
+                                    Layout.fillWidth: true
                                 }
                             }
-                        }
-                        contentItem: Text {
-                            anchors.centerIn: parent
-                            text: "Send"
-                            color: palette.panel
-                            font.pixelSize: 15
-                            font.bold: true
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                        onClicked: {
-                            var text = messageField.text.trim()
-                            if (text.length > 0) {
-                                chatClient.sendMessage(text)
-                                messageField.text = ""
-                                window.publicDraft = ""
-                                chatClient.indicatePublicTyping(false)
-                                publicTypingTimer.stop()
-                                scrollArea.scrollToEnd(true)
+
+                            ToolButton {
+                                Layout.preferredWidth: 28
+                                Layout.preferredHeight: 28
+                                padding: 0
+                                text: "\u2715"
+                                onClicked: {
+                                    window.publicPendingFile = null
+                                    messageField.forceActiveFocus()
+                                }
+                                background: Rectangle {
+                                    radius: 12
+                                    color: window.palette.surface
+                                    border.color: window.palette.outline
+                                    border.width: 1
+                                }
+                                contentItem: Text {
+                                    anchors.centerIn: parent
+                                    text: parent.text
+                                    color: window.palette.textSecondary
+                                    font.pixelSize: 12
+                                }
                             }
                         }
                     }
@@ -1335,12 +1593,14 @@ ApplicationWindow {
             property string peerKey: ""
             property string displayName: ""
             property var conversationModel: null
+            property var pendingFile: null
 
             function setup(key, title, model) {
                 peerKey = key || ""
                 displayName = title || key || ""
                 conversationModel = model
                 messageField.text = window.privateDrafts[peerKey] || ""
+                pendingFile = window.getPrivatePendingFile(peerKey)
                 privateTypingTimer.stop()
                 scrollArea.scrollToEnd(false)
             }
@@ -1360,6 +1620,49 @@ ApplicationWindow {
                 onTriggered: {
                     if (peerKey.length > 0) {
                         chatClient.indicatePrivateTyping(peerKey, false)
+                    }
+                }
+            }
+
+            Menu {
+                id: privateEmojiMenu
+                Repeater {
+                    model: window.emojiOptions
+                    delegate: MenuItem {
+                        text: modelData
+                        onTriggered: {
+                            window.insertEmojiIntoField(messageField, modelData)
+                            messageField.forceActiveFocus()
+                        }
+                    }
+                }
+            }
+
+            Platform.FileDialog {
+                id: privateFileDialog
+                title: "Select a file to whisper"
+                onAccepted: {
+                    if (peerKey.length === 0) {
+                        return
+                    }
+                    var target = ""
+                    if (privateFileDialog.file && privateFileDialog.file.toString) {
+                        target = privateFileDialog.file.toString()
+                    } else if (privateFileDialog.file) {
+                        target = String(privateFileDialog.file)
+                    } else if (privateFileDialog.files && privateFileDialog.files.length > 0) {
+                        var candidate = privateFileDialog.files[0]
+                        target = candidate && candidate.toString ? candidate.toString() : String(candidate)
+                    }
+                    if (target.length > 0) {
+                        var meta = chatClient.inspectFile(target)
+                        if (meta && meta.path) {
+                            pendingFile = meta
+                            window.setPrivatePendingFile(peerKey, meta)
+                            messageField.forceActiveFocus()
+                            chatClient.indicatePrivateTyping(peerKey, false)
+                            privateTypingTimer.stop()
+                        }
                     }
                 }
             }
@@ -1494,183 +1797,340 @@ ApplicationWindow {
 
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 84
                 radius: 22
                 color: window.palette.surface
                 border.color: window.palette.outline
                 border.width: 1
+                implicitHeight: privateComposerContent.implicitHeight + 36
 
-                RowLayout {
+                ColumnLayout {
+                    id: privateComposerContent
                     anchors.fill: parent
                     anchors.margins: 18
-                    spacing: 16
+                    spacing: 12
 
-                    Rectangle {
-                        id: privateMessageFieldFrame
+                    RowLayout {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 48
-                        radius: 16
-                        color: window.palette.canvas
-                        border.color: messageField.activeFocus ? window.palette.accent : window.palette.outline
-                        border.width: 1
-                        property real rippleProgress: 0
-                        Behavior on border.color {
-                            ColorAnimation {
-                                duration: 180
-                                easing.type: Easing.OutQuad
-                            }
-                        }
+                        spacing: 16
 
                         Rectangle {
-                            anchors.fill: parent
-                            radius: parent.radius
-                            color: "transparent"
-                            border.width: 0
-                            opacity: messageField.activeFocus ? 0.35 : 0.0
-                            visible: opacity > 0
-                            gradient: Gradient {
-                                GradientStop {
-                                    position: Math.max(0.0, privateMessageFieldFrame.rippleProgress - 0.2)
-                                    color: "#00FFFFFF"
-                                }
-                                GradientStop {
-                                    position: Math.max(0.0, Math.min(1.0, privateMessageFieldFrame.rippleProgress))
-                                    color: window.palette.accent
-                                }
-                                GradientStop {
-                                    position: Math.min(1.0, privateMessageFieldFrame.rippleProgress + 0.2)
-                                    color: "#00FFFFFF"
-                                }
-                            }
-                            Behavior on opacity {
-                                NumberAnimation {
-                                    duration: 220
+                            id: privateMessageFieldFrame
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 48
+                            radius: 16
+                            color: window.palette.canvas
+                            border.color: messageField.activeFocus ? window.palette.accent : window.palette.outline
+                            border.width: 1
+                            property real rippleProgress: 0
+                            Behavior on border.color {
+                                ColorAnimation {
+                                    duration: 180
                                     easing.type: Easing.OutQuad
                                 }
                             }
-                        }
 
-                        NumberAnimation {
-                            id: privateRippleAnimator
-                            target: privateMessageFieldFrame
-                            property: "rippleProgress"
-                            from: 0
-                            to: 1
-                            duration: 520
-                            easing.type: Easing.OutQuad
-                        }
-
-                        TextField {
-                            id: messageField
-                            anchors.fill: parent
-                            leftPadding: 18
-                            rightPadding: 18
-                            topPadding: 12
-                            bottomPadding: 12
-                            placeholderText: displayName.length > 0 ? "Whisper to " + displayName : "Whisper to this guest"
-                            placeholderTextColor: window.palette.textSecondary
-                            color: window.palette.textPrimary
-                            selectionColor: window.palette.accent
-                            selectedTextColor: window.palette.textPrimary
-                            verticalAlignment: Text.AlignVCenter
-                            font.pixelSize: 14
-                            wrapMode: Text.WordWrap
-                            cursorDelegate: Rectangle {
-                                width: 2
-                                color: window.palette.accent
-                            }
-                            background: null
-                            selectByMouse: true
-                            onAccepted: sendButton.clicked()
-                            onActiveFocusChanged: {
-                                if (activeFocus) {
-                                    privateMessageFieldFrame.rippleProgress = 0
-                                    privateRippleAnimator.restart()
-                                } else {
-                                    privateRippleAnimator.stop()
-                                    privateMessageFieldFrame.rippleProgress = 0
-                                    if (peerKey.length > 0) {
-                                        chatClient.indicatePrivateTyping(peerKey, false)
-                                        privateTypingTimer.stop()
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: parent.radius
+                                color: "transparent"
+                                border.width: 0
+                                opacity: messageField.activeFocus ? 0.35 : 0.0
+                                visible: opacity > 0
+                                gradient: Gradient {
+                                    GradientStop {
+                                        position: Math.max(0.0, privateMessageFieldFrame.rippleProgress - 0.2)
+                                        color: "#00FFFFFF"
+                                    }
+                                    GradientStop {
+                                        position: Math.max(0.0, Math.min(1.0, privateMessageFieldFrame.rippleProgress))
+                                        color: window.palette.accent
+                                    }
+                                    GradientStop {
+                                        position: Math.min(1.0, privateMessageFieldFrame.rippleProgress + 0.2)
+                                        color: "#00FFFFFF"
+                                    }
+                                }
+                                Behavior on opacity {
+                                    NumberAnimation {
+                                        duration: 220
+                                        easing.type: Easing.OutQuad
                                     }
                                 }
                             }
-                            onTextChanged: {
-                                if (peerKey.length > 0) {
-                                    window.privateDrafts[peerKey] = text
-                                    if (text.length > 0) {
-                                        chatClient.indicatePrivateTyping(peerKey, true)
-                                        privateTypingTimer.restart()
+
+                            NumberAnimation {
+                                id: privateRippleAnimator
+                                target: privateMessageFieldFrame
+                                property: "rippleProgress"
+                                from: 0
+                                to: 1
+                                duration: 520
+                                easing.type: Easing.OutQuad
+                            }
+
+                            TextField {
+                                id: messageField
+                                anchors.fill: parent
+                                leftPadding: 18
+                                rightPadding: 18
+                                topPadding: 12
+                                bottomPadding: 12
+                                placeholderText: displayName.length > 0 ? "Whisper to " + displayName : "Whisper to this guest"
+                                placeholderTextColor: window.palette.textSecondary
+                                color: window.palette.textPrimary
+                                selectionColor: window.palette.accent
+                                selectedTextColor: window.palette.textPrimary
+                                verticalAlignment: Text.AlignVCenter
+                                font.pixelSize: 14
+                                wrapMode: Text.WordWrap
+                                cursorDelegate: Rectangle {
+                                    width: 2
+                                    color: window.palette.accent
+                                }
+                                background: null
+                                selectByMouse: true
+                                onAccepted: sendButton.clicked()
+                                onActiveFocusChanged: {
+                                    if (activeFocus) {
+                                        privateMessageFieldFrame.rippleProgress = 0
+                                        privateRippleAnimator.restart()
                                     } else {
-                                        chatClient.indicatePrivateTyping(peerKey, false)
-                                        privateTypingTimer.stop()
+                                        privateRippleAnimator.stop()
+                                        privateMessageFieldFrame.rippleProgress = 0
+                                        if (peerKey.length > 0) {
+                                            chatClient.indicatePrivateTyping(peerKey, false)
+                                            privateTypingTimer.stop()
+                                        }
                                     }
+                                }
+                                onTextChanged: {
+                                    if (peerKey.length > 0) {
+                                        window.privateDrafts[peerKey] = text
+                                        if (text.length > 0) {
+                                            chatClient.indicatePrivateTyping(peerKey, true)
+                                            privateTypingTimer.restart()
+                                        } else {
+                                            chatClient.indicatePrivateTyping(peerKey, false)
+                                            privateTypingTimer.stop()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        ToolButton {
+                            id: privateEmojiButton
+                            Layout.preferredWidth: 48
+                            Layout.preferredHeight: 48
+                            padding: 0
+                            focusPolicy: Qt.NoFocus
+                            property color baseColor: window.palette.canvas
+                            property color hoverColor: window.palette.surface
+                            property color activeColor: window.palette.accentSoft
+                            property color borderColor: window.palette.outline
+                            text: "😊"
+                            font.pixelSize: 20
+                            onClicked: {
+                                var pos = mapToItem(null, 0, height)
+                                privateEmojiMenu.x = pos.x
+                                privateEmojiMenu.y = pos.y
+                                privateEmojiMenu.open()
+                            }
+                            background: Rectangle {
+                                radius: 18
+                                color: privateEmojiButton.down ? privateEmojiButton.activeColor : (privateEmojiButton.hovered ? privateEmojiButton.hoverColor : privateEmojiButton.baseColor)
+                                border.width: 1
+                                border.color: privateEmojiButton.down || privateEmojiButton.hovered ? window.palette.accent : privateEmojiButton.borderColor
+                                Behavior on color {
+                                    ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+                                }
+                                Behavior on border.color {
+                                    ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+                                }
+                            }
+                            contentItem: Text {
+                                anchors.fill: parent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                text: privateEmojiButton.text
+                                color: window.palette.textPrimary
+                                font.pixelSize: privateEmojiButton.font.pixelSize
+                            }
+                        }
+
+                        ToolButton {
+                            id: privateFileButton
+                            Layout.preferredWidth: 48
+                            Layout.preferredHeight: 48
+                            padding: 0
+                            focusPolicy: Qt.NoFocus
+                            property color baseColor: window.palette.canvas
+                            property color hoverColor: window.palette.surface
+                            property color activeColor: window.palette.accentSoft
+                            property color borderColor: window.palette.outline
+                            text: "📎"
+                            font.pixelSize: 18
+                            enabled: peerKey.length > 0
+                            onClicked: privateFileDialog.open()
+                            background: Rectangle {
+                                radius: 18
+                                color: privateFileButton.down ? privateFileButton.activeColor : (privateFileButton.hovered ? privateFileButton.hoverColor : privateFileButton.baseColor)
+                                border.width: 1
+                                border.color: privateFileButton.down || privateFileButton.hovered ? window.palette.accent : privateFileButton.borderColor
+                                Behavior on color {
+                                    ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+                                }
+                                Behavior on border.color {
+                                    ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+                                }
+                            }
+                            contentItem: Text {
+                                anchors.fill: parent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                text: privateFileButton.text
+                                color: window.palette.textPrimary
+                                font.pixelSize: privateFileButton.font.pixelSize
+                            }
+                        }
+
+                        Button {
+                            id: sendButton
+                            Layout.preferredWidth: 124
+                            Layout.preferredHeight: 48
+                            padding: 0
+                            topPadding: 0
+                            bottomPadding: 0
+                            leftPadding: 0
+                            rightPadding: 0
+                            transformOrigin: Item.Center
+                            scale: down ? 0.95 : (hovered ? 1.05 : 1.0)
+                            Behavior on scale {
+                                NumberAnimation {
+                                    duration: 160
+                                    easing.type: Easing.OutQuad
+                                }
+                            }
+                            background: Rectangle {
+                                radius: 22
+                                border.width: 0
+                                gradient: Gradient {
+                                    GradientStop { position: 0.0; color: palette.accentBold }
+                                    GradientStop { position: 1.0; color: palette.accent }
+                                }
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: parent.radius
+                                    gradient: Gradient {
+                                        GradientStop { position: 0.0; color: "#40FFFFFF" }
+                                        GradientStop { position: 1.0; color: "#00FFFFFF" }
+                                    }
+                                    opacity: sendButton.down ? 0.55 : (sendButton.hovered ? 0.28 : 0.0)
+                                    Behavior on opacity {
+                                        NumberAnimation {
+                                            duration: 160
+                                            easing.type: Easing.OutQuad
+                                        }
+                                    }
+                                }
+                            }
+                            contentItem: Text {
+                                anchors.centerIn: parent
+                                text: "Send"
+                                color: palette.panel
+                                font.pixelSize: 15
+                                font.bold: true
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            onClicked: {
+                                if (peerKey.length === 0) {
+                                    return
+                                }
+                                var text = messageField.text.trim()
+                                var pendingPath = pendingFile && pendingFile.path ? pendingFile.path : ""
+                                if (text.length === 0 && pendingPath.length === 0) {
+                                    chatClient.sendPrivateMessageWithAttachment(peerKey, "", "")
+                                    return
+                                }
+                                chatClient.sendPrivateMessageWithAttachment(peerKey, text, pendingPath)
+                                if (text.length > 0 || pendingPath.length > 0) {
+                                    messageField.text = ""
+                                    window.privateDrafts[peerKey] = ""
+                                    pendingFile = null
+                                    window.setPrivatePendingFile(peerKey, null)
+                                    window.setConversationUnread(peerKey, false)
+                                    chatClient.indicatePrivateTyping(peerKey, false)
+                                    privateTypingTimer.stop()
+                                    scrollArea.scrollToEnd(true)
                                 }
                             }
                         }
                     }
 
-                    Button {
-                        id: sendButton
-                        Layout.preferredWidth: 124
-                        Layout.preferredHeight: 48
-                        padding: 0
-                        topPadding: 0
-                        bottomPadding: 0
-                        leftPadding: 0
-                        rightPadding: 0
-                        transformOrigin: Item.Center
-                        scale: down ? 0.95 : (hovered ? 1.05 : 1.0)
-                        Behavior on scale {
-                            NumberAnimation {
-                                duration: 160
-                                easing.type: Easing.OutQuad
+                    Rectangle {
+                        Layout.fillWidth: true
+                        visible: pendingFile !== null
+                        radius: 14
+                        color: window.palette.canvas
+                        border.color: window.palette.outline
+                        border.width: 1
+                        implicitHeight: privateAttachmentRow.implicitHeight + 16
+
+                        RowLayout {
+                            id: privateAttachmentRow
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            spacing: 12
+
+                            Text {
+                                text: "📎"
+                                font.pixelSize: 20
+                                color: window.palette.accent
                             }
-                        }
-                        background: Rectangle {
-                            radius: 22
-                            border.width: 0
-                            gradient: Gradient {
-                                GradientStop { position: 0.0; color: palette.accentBold }
-                                GradientStop { position: 1.0; color: palette.accent }
-                            }
-                            Rectangle {
-                                anchors.fill: parent
-                                radius: parent.radius
-                                gradient: Gradient {
-                                    GradientStop { position: 0.0; color: "#40FFFFFF" }
-                                    GradientStop { position: 1.0; color: "#00FFFFFF" }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+
+                                Text {
+                                    text: pendingFile ? pendingFile.name : ""
+                                    color: window.palette.textPrimary
+                                    font.pixelSize: 13
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
                                 }
-                                opacity: sendButton.down ? 0.55 : (sendButton.hovered ? 0.28 : 0.0)
-                                Behavior on opacity {
-                                    NumberAnimation {
-                                        duration: 160
-                                        easing.type: Easing.OutQuad
-                                    }
+
+                                Text {
+                                    text: pendingFile ? window.formatFileSize(pendingFile.size) : ""
+                                    color: window.palette.textSecondary
+                                    font.pixelSize: 11
+                                    Layout.fillWidth: true
                                 }
                             }
-                        }
-                        contentItem: Text {
-                            anchors.centerIn: parent
-                            text: "Send"
-                            color: palette.panel
-                            font.pixelSize: 15
-                            font.bold: true
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                        onClicked: {
-                            if (peerKey.length === 0) {
-                                return
-                            }
-                            var text = messageField.text.trim()
-                            if (text.length > 0) {
-                                chatClient.sendPrivateMessage(peerKey, text)
-                                messageField.text = ""
-                                window.privateDrafts[peerKey] = ""
-                                window.setConversationUnread(peerKey, false)
-                                chatClient.indicatePrivateTyping(peerKey, false)
-                                privateTypingTimer.stop()
+
+                            ToolButton {
+                                Layout.preferredWidth: 28
+                                Layout.preferredHeight: 28
+                                padding: 0
+                                text: "\u2715"
+                                onClicked: {
+                                    pendingFile = null
+                                    window.setPrivatePendingFile(peerKey, null)
+                                    messageField.forceActiveFocus()
+                                }
+                                background: Rectangle {
+                                    radius: 12
+                                    color: window.palette.surface
+                                    border.color: window.palette.outline
+                                    border.width: 1
+                                }
+                                contentItem: Text {
+                                    anchors.centerIn: parent
+                                    text: parent.text
+                                    color: window.palette.textSecondary
+                                    font.pixelSize: 12
+                                }
                             }
                         }
                     }
@@ -1736,6 +2196,9 @@ ApplicationWindow {
                 color: messageContainer.isSystem ? palette.accentSoft : (model.isPrivate ? ((model.isOutgoing === true) ? palette.card : palette.accentSoft) : palette.card)
                 border.width: 1
                 property color baseBorder: messageContainer.isSystem ? palette.accent : (model.isPrivate ? ((model.isOutgoing === true) ? palette.canvas : palette.accent) : palette.canvas)
+                property bool hasText: model.text && model.text.length > 0
+                property bool hasFile: model.fileName && model.fileName.length > 0
+                implicitHeight: bubbleContent.implicitHeight + 40
                 border.color: baseBorder
                 Behavior on border.color {
                     ColorAnimation {
@@ -1770,17 +2233,81 @@ ApplicationWindow {
                 }
 
                 Column {
-                    anchors.fill: parent
-                    anchors.margins: 20
-                    spacing: 6
+                    id: bubbleContent
+                    width: parent.width - 40
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.leftMargin: 20
+                    anchors.rightMargin: 20
+                    anchors.top: parent.top
+                    anchors.topMargin: 20
+                    spacing: messageBubble.hasText && messageBubble.hasFile ? 12 : 6
 
                     Text {
+                        visible: messageBubble.hasText
                         text: model.text
                         color: palette.textPrimary
                         wrapMode: Text.Wrap
                         width: parent.width
                         font.pixelSize: 15
                         lineHeight: 1.35
+                    }
+
+                    Rectangle {
+                        width: parent.width
+                        visible: messageBubble.hasFile
+                        radius: 10
+                        color: palette.surface
+                        border.color: palette.outline
+                        border.width: 1
+                        implicitHeight: attachmentRow.implicitHeight + 16
+
+                        RowLayout {
+                            id: attachmentRow
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            spacing: 12
+
+                            Text {
+                                text: "📎"
+                                font.pixelSize: 20
+                                color: palette.accent
+                            }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+
+                                Text {
+                                    text: model.fileName
+                                    color: palette.textPrimary
+                                    font.pixelSize: 13
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+
+                                Text {
+                                    text: window.formatFileSize(model.fileSize)
+                                    color: palette.textSecondary
+                                    font.pixelSize: 11
+                                    Layout.fillWidth: true
+                                }
+                            }
+
+                            Button {
+                                text: "Open"
+                                focusPolicy: Qt.NoFocus
+                                onClicked: {
+                                    if (!model.fileData || model.fileData.length === 0) {
+                                        return
+                                    }
+                                    var url = chatClient.saveFileToTemp(model.fileName, model.fileData, model.fileMime)
+                                    if (url && url.length > 0) {
+                                        Qt.openUrlExternally(url)
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     Text {
@@ -1952,12 +2479,17 @@ ApplicationWindow {
     Connections {
         target: chatClient
 
-        function onMessageReceived(username, message) {
+        function onMessageReceived(username, message, file) {
             messagesModel.append({
                 "user": username,
                 "text": message,
-                "isPrivate": false
+                "isPrivate": false,
+                "fileName": file && file.name ? file.name : "",
+                "fileMime": file && file.mime ? file.mime : "",
+                "fileData": file && file.data ? file.data : "",
+                "fileSize": file && file.size ? Number(file.size) : 0
             })
+            window.updatePublicTyping(username, false)
             var idx = window.conversationIndex("public")
             var isActive = idx === conversationTabBar.currentIndex
             if (!isActive) {
@@ -1982,7 +2514,11 @@ ApplicationWindow {
                 messagesModel.append({
                     "user": entry.username ? entry.username : "Unknown",
                     "text": entry.message ? entry.message : "",
-                    "isPrivate": false
+                    "isPrivate": false,
+                    "fileName": entry.file && entry.file.name ? entry.file.name : "",
+                    "fileMime": entry.file && entry.file.mime ? entry.file.mime : "",
+                    "fileData": entry.file && entry.file.data ? entry.file.data : "",
+                    "fileSize": entry.file && entry.file.size ? Number(entry.file.size) : 0
                 })
             }
             window.setConversationUnread("public", false)
@@ -1992,25 +2528,25 @@ ApplicationWindow {
             }
         }
 
-        function onPrivateMessageReceived(sender, recipient, message, messageId, status) {
+        function onPrivateMessageReceived(sender, recipient, message, messageId, status, file) {
             var currentUser = chatClient.username
             var isOutgoing = sender === currentUser
             var peer = isOutgoing ? recipient : sender
             if (!peer || peer.length === 0) {
                 return
             }
-            window.appendPrivateMessage(peer, sender, message, isOutgoing, messageId, status)
+            window.appendPrivateMessage(peer, sender, message, isOutgoing, messageId, status, file)
             if (!isOutgoing) {
                 window.updatePrivateTyping(sender, false)
             }
         }
 
-        function onPrivateMessageSent(sender, recipient, message, messageId, status) {
+        function onPrivateMessageSent(sender, recipient, message, messageId, status, file) {
             var peer = recipient
             if (!peer || peer.length === 0) {
                 return
             }
-            window.appendPrivateMessage(peer, sender, message, true, messageId, status)
+            window.appendPrivateMessage(peer, sender, message, true, messageId, status, file)
             window.setConversationUnread(peer, false)
         }
 
@@ -2061,7 +2597,11 @@ ApplicationWindow {
             messagesModel.append({
                 "user": "System",
                 "text": "You have been disconnected.",
-                "isPrivate": false
+                "isPrivate": false,
+                "fileName": "",
+                "fileMime": "",
+                "fileData": "",
+                "fileSize": 0
             })
             window.setConversationUnread("public", false)
             disconnectAnimation.restart()
@@ -2071,7 +2611,11 @@ ApplicationWindow {
             messagesModel.append({
                 "user": "System",
                 "text": message,
-                "isPrivate": false
+                "isPrivate": false,
+                "fileName": "",
+                "fileMime": "",
+                "fileData": "",
+                "fileSize": 0
             })
             var idx = window.conversationIndex("public")
             var isActive = idx === conversationTabBar.currentIndex

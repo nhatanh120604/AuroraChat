@@ -60,7 +60,7 @@ These are the most critical features needed to make the application robust and u
 These features would significantly improve the user experience and overall quality of the application.
 
 1.  **Dedicated Private Message UI**: Instead of using the `/msg` command, create a UI where clicking a user opens a separate, dedicated chat tab or window for that private conversation.
-2.  **"User is Typing..." Indicator**: Show when a user is typing a message in a private or public chat, which makes the conversation feel more alive.
-3.  **Read Receipts**: Show when a user has seen a private message (e.g., with a double-check icon).
+2.  **"User is Typing..." Indicator**: Show when a user is typing a message in a private or public chat, which makes the conversation feel more alive. (DONE)
+3.  **Read Receipts**: Show when a user has seen a private message (e.g., with a double-check icon). (DONE)
 4.  **Support for Multiple Chat Rooms**: Allow users to create or join different public chat rooms instead of having a single global one.
 5.  **Configuration Management**: Use a library like `python-dotenv` to manage server configuration (ports, database URLs, secret keys) through environment variables instead of hardcoding them.

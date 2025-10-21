@@ -8,6 +8,41 @@ from dotenv import load_dotenv
 
 
 MAX_PUBLIC_HISTORY = 200
+MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 MB safety cap
+
+
+def _sanitize_file_payload(data):
+    """Validate and clamp incoming file payloads."""
+    if not isinstance(data, dict):
+        return None
+
+    name = str(data.get("name", ""))[:255]
+    mime = str(data.get("mime", "application/octet-stream"))[:255]
+    size = data.get("size", 0)
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        size = 0
+
+    b64_data = data.get("data")
+    if not isinstance(b64_data, str) or not b64_data:
+        return None
+
+    if size > MAX_FILE_BYTES:
+        logging.warning("Rejected file '%s' exceeding size cap", name)
+        return None
+
+    if len(b64_data) > (MAX_FILE_BYTES * 4) // 3 + 8:
+        logging.warning("Rejected file '%s' due to encoded length", name)
+        return None
+
+    return {
+        "name": name,
+        "mime": mime,
+        "size": size,
+        "data": b64_data,
+    }
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -20,7 +55,10 @@ logging.basicConfig(
 
 class ChatServer:
     def __init__(self, test=False):
-        self.sio = socketio.Server(cors_allowed_origins="*")
+        self.sio = socketio.Server(
+            cors_allowed_origins="*",
+            max_http_buffer_size=MAX_FILE_BYTES * 2,
+        )
         self.app = Flask(__name__)
         self.app.wsgi_app = socketio.WSGIApp(self.sio, self.app.wsgi_app)
         self.clients = {}
@@ -101,21 +139,23 @@ class ChatServer:
                 sender_username = self.clients.get(sid, "Unknown")
 
             message_text = data.get("message")
+            file_payload = _sanitize_file_payload(data.get("file"))
+
+            if isinstance(message_text, str):
+                message_text = message_text.strip()
+            else:
+                message_text = ""
 
             # Input validation
-            if (
-                not message_text
-                or not isinstance(message_text, str)
-                or not message_text.strip()
-            ):
+            if not message_text and not file_payload:
                 logging.warning(
-                    f"Empty message from {sender_username} ({sid}) ignored."
+                    f"Empty message payload from {sender_username} ({sid}) ignored."
                 )
                 return
 
             # The data from the test client is the entire payload.
             # We need to add the sender's username and broadcast it.
-            if data and "message" in data:
+            if data:
                 # Prepare the payload to be sent to all clients
                 broadcast_data = {
                     "username": sender_username,
@@ -124,6 +164,8 @@ class ChatServer:
                         "timestamp"
                     ),  # Forward the timestamp for latency calculation
                 }
+                if file_payload:
+                    broadcast_data["file"] = file_payload
 
                 with self.lock:
                     self.public_history.append(broadcast_data)
@@ -141,6 +183,7 @@ class ChatServer:
 
             recipient_username = data.get("recipient")
             message = data.get("message")
+            file_payload = _sanitize_file_payload(data.get("file"))
 
             # Input validation
             if (
@@ -152,9 +195,19 @@ class ChatServer:
                     "error", {"message": "A valid recipient is required."}, to=sid
                 )
                 return
-            if not message or not isinstance(message, str) or not message.strip():
+
+            if isinstance(message, str):
+                message = message.strip()
+            else:
+                message = ""
+
+            if not message and not file_payload:
                 self.sio.emit(
-                    "error", {"message": "Cannot send an empty message."}, to=sid
+                    "error",
+                    {
+                        "message": "Cannot send an empty message. Attach a file or include text."
+                    },
+                    to=sid,
                 )
                 return
 
@@ -208,6 +261,9 @@ class ChatServer:
                     recipient_payload["status"] = "delivered"
                     sender_payload = dict(payload)
                     sender_payload["status"] = "sent"
+                    if file_payload:
+                        recipient_payload["file"] = file_payload
+                        sender_payload["file"] = file_payload
 
                     self.sio.emit(
                         "private_message_received", recipient_payload, to=recipient_sid
@@ -242,7 +298,7 @@ class ChatServer:
                 )
 
         @self.sio.event
-        def request_history(sid):
+        def request_history(sid, data=None):
             with self.lock:
                 history_snapshot = list(self.public_history)
             self.sio.emit("chat_history", {"messages": history_snapshot}, to=sid)
