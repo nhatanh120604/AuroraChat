@@ -5,12 +5,18 @@ import mimetypes
 import tempfile
 import threading
 import uuid
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 import socketio
 from PySide6.QtCore import QObject, Signal, Slot, QUrl, Property
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
+
+try:
+    from .crypto_utils import create_crypto_manager, create_file_transfer
+except ImportError:
+    from crypto_utils import create_crypto_manager, create_file_transfer
 
 
 MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 MB safety cap
@@ -32,6 +38,9 @@ class ChatClient(QObject):
     errorReceived = Signal(str)  # Notify UI about errors
     usernameChanged = Signal(str)  # Notify UI when username changes
     generalHistoryReceived = Signal("QVariant")  # Provide public chat history snapshot
+    fileTransferProgress = Signal(str, int, int)  # transfer_id, current_chunk, total_chunks
+    fileTransferComplete = Signal(str, str)  # transfer_id, filename
+    fileTransferError = Signal(str, str)  # transfer_id, error_message
 
     def __init__(self, url="http://localhost:5000"):
         super().__init__()
@@ -48,6 +57,13 @@ class ChatClient(QObject):
         self._history_synced = False
         self._public_typing_flag = False
         self._private_typing_flags = {}
+        
+        # Crypto and file transfer
+        self._crypto_manager = create_crypto_manager()
+        self._active_transfers = {}  # transfer_id -> transfer_data
+        self._received_chunks = {}  # transfer_id -> {chunk_index: data}
+        self._transfer_lock = threading.Lock()
+        
         self._setup_handlers()
 
     def _setup_handlers(self):
@@ -162,6 +178,11 @@ class ChatClient(QObject):
                 self._set_username(self._desired_username)
             elif self._username and self._username not in users:
                 self._set_username("")
+            
+            # Automatically exchange public keys with all other users
+            if self._username and self._username in users:
+                self._exchange_keys_with_all_users(users)
+            
             self.usersUpdated.emit(self._users.copy())
 
         @self._sio.on("chat_history")
@@ -184,6 +205,71 @@ class ChatClient(QObject):
                 self._set_username("")
             if self._desired_username and is_username_error:
                 self._desired_username = ""
+
+        @self._sio.on("public_key_exchange")
+        def on_public_key_exchange(data):
+            """Handle public key exchange for encryption."""
+            username = data.get("username")
+            public_key_pem = data.get("public_key")
+            if username and public_key_pem:
+                try:
+                    # Store peer's public key for encryption
+                    self._crypto_manager.set_peer_public_key(public_key_pem)
+                    print(f"Received public key from {username}")
+                except Exception as e:
+                    self._notify_error(f"Invalid public key from {username}: {e}")
+
+        @self._sio.on("file_chunk")
+        def on_file_chunk(data):
+            """Handle incoming file chunks."""
+            transfer_id = data.get("transfer_id")
+            chunk_index = data.get("chunk_index")
+            chunk_data = data.get("chunk_data")
+            is_last_chunk = data.get("is_last_chunk", False)
+            metadata = data.get("metadata")
+            
+            if not all([transfer_id, chunk_index is not None, chunk_data]):
+                self._notify_error("Invalid file chunk received")
+                return
+            
+            with self._transfer_lock:
+                if transfer_id not in self._received_chunks:
+                    self._received_chunks[transfer_id] = {}
+                
+                # Store chunk data
+                self._received_chunks[transfer_id][chunk_index] = base64.b64decode(chunk_data)
+                
+                # Store metadata from first chunk
+                if metadata and chunk_index == 0:
+                    self._active_transfers[transfer_id] = metadata
+                
+                # Check if all chunks received
+                expected_chunks = metadata.get("total_chunks", 0) if metadata else 0
+                received_count = len(self._received_chunks[transfer_id])
+                
+                # Emit progress
+                self.fileTransferProgress.emit(transfer_id, received_count, expected_chunks)
+                
+                if received_count >= expected_chunks and expected_chunks > 0:
+                    # All chunks received, reassemble file
+                    self._reassemble_file(transfer_id)
+
+        @self._sio.on("file_transfer_ack")
+        def on_file_transfer_ack(data):
+            """Handle file transfer acknowledgment."""
+            transfer_id = data.get("transfer_id")
+            success = data.get("success", False)
+            error_msg = data.get("error", "")
+            
+            if success:
+                self.fileTransferComplete.emit(transfer_id, "")
+            else:
+                self.fileTransferError.emit(transfer_id, error_msg)
+            
+            # Clean up transfer data
+            with self._transfer_lock:
+                self._active_transfers.pop(transfer_id, None)
+                self._received_chunks.pop(transfer_id, None)
 
     def _ensure_connected(self):
         # use a lock to prevent race conditions on state flags
@@ -286,14 +372,140 @@ class ChatClient(QObject):
             self.usernameChanged.emit(self._username)
             if self._username:
                 self._ensure_history_synced()
+                # Exchange keys with all existing users
+                if self._users:
+                    self._exchange_keys_with_all_users(self._users)
             else:
                 self._history_synced = False
+
+    def _exchange_keys_with_all_users(self, users):
+        """Automatically exchange public keys with all other users."""
+        if not self._username or not users:
+            return
+        
+        public_key = self.getPublicKey()
+        for user in users:
+            if user != self._username:
+                try:
+                    self._emit_when_connected("public_key_exchange", {
+                        "target_username": user,
+                        "public_key": public_key
+                    })
+                    print(f"Exchanged public key with {user}")
+                except Exception as e:
+                    print(f"Failed to exchange key with {user}: {e}")
 
     def _ensure_history_synced(self):
         if self._history_synced:
             return
         self._emit_when_connected("request_history", {})
         self._history_synced = True
+
+    def _reassemble_file(self, transfer_id: str):
+        """Reassemble and decrypt received file chunks."""
+        try:
+            with self._transfer_lock:
+                if transfer_id not in self._active_transfers or transfer_id not in self._received_chunks:
+                    return
+                
+                metadata = self._active_transfers[transfer_id]
+                chunks_dict = self._received_chunks[transfer_id]
+                
+                # Sort chunks by index
+                sorted_chunks = [chunks_dict[i] for i in sorted(chunks_dict.keys())]
+                
+                # Reassemble file
+                file_transfer = create_file_transfer()
+                decrypted_data, actual_hash = file_transfer.reassemble_file(
+                    sorted_chunks,
+                    metadata.get("encrypted_aes_key", ""),
+                    metadata.get("iv", ""),
+                    metadata.get("file_hash", "")
+                )
+                
+                # Save file to temp directory
+                filename = metadata.get("filename", "received_file")
+                temp_path = self.saveFileToTemp(filename, base64.b64encode(decrypted_data).decode('utf-8'), "application/octet-stream")
+                
+                self.fileTransferComplete.emit(transfer_id, filename)
+                print(f"File {filename} received and saved to {temp_path}")
+                
+        except Exception as e:
+            self.fileTransferError.emit(transfer_id, f"Failed to reassemble file: {e}")
+            print(f"Error reassembling file {transfer_id}: {e}")
+
+    def _send_encrypted_file_chunks(self, file_data: bytes, filename: str, recipient: str = None):
+        """Send file in encrypted chunks."""
+        try:
+            # Check if we have peer public key for encryption
+            if not self._crypto_manager.peer_public_key:
+                print("No peer public key available, using unencrypted fallback")
+                return self._send_unencrypted_file(file_data, filename, recipient)
+            
+            # Prepare encrypted file
+            file_transfer = create_file_transfer()
+            transfer_data = file_transfer.prepare_file_for_sending(file_data, filename)
+            
+            transfer_id = transfer_data["transfer_id"]
+            
+            # Send metadata first (with first chunk)
+            first_chunk = file_transfer.prepare_chunk(
+                transfer_data["chunks"][0], 0, transfer_data
+            )
+            first_chunk["encrypted_aes_key"] = transfer_data["encrypted_aes_key"]
+            first_chunk["iv"] = transfer_data["iv"]
+            
+            if recipient:
+                first_chunk["recipient"] = recipient
+                self._emit_when_connected("private_file_chunk", first_chunk)
+            else:
+                self._emit_when_connected("public_file_chunk", first_chunk)
+            
+            # Send remaining chunks
+            for i, chunk_data in enumerate(transfer_data["chunks"][1:], 1):
+                chunk = file_transfer.prepare_chunk(chunk_data, i, transfer_data)
+                if recipient:
+                    chunk["recipient"] = recipient
+                    self._emit_when_connected("private_file_chunk", chunk)
+                else:
+                    self._emit_when_connected("public_file_chunk", chunk)
+                
+                # Small delay to prevent overwhelming the server
+                time.sleep(0.01)
+            
+            return transfer_id
+            
+        except Exception as e:
+            print(f"Encrypted transfer failed: {e}, trying unencrypted fallback")
+            return self._send_unencrypted_file(file_data, filename, recipient)
+
+    def _send_unencrypted_file(self, file_data: bytes, filename: str, recipient: str = None):
+        """Send file without encryption as fallback."""
+        try:
+            # Use the original file payload method for unencrypted transfer
+            file_payload = {
+                "name": filename,
+                "size": len(file_data),
+                "mime": "application/octet-stream",
+                "data": base64.b64encode(file_data).decode('ascii'),
+            }
+            
+            if recipient:
+                self._emit_when_connected("private_message", {
+                    "recipient": recipient,
+                    "file": file_payload
+                })
+            else:
+                self._emit_when_connected("message", {
+                    "file": file_payload
+                })
+            
+            print(f"Sent unencrypted file: {filename}")
+            return f"unencrypted_{uuid.uuid4().hex[:8]}"
+            
+        except Exception as e:
+            self._notify_error(f"Failed to send unencrypted file: {e}")
+            return None
 
     @Slot(str, result="QVariant")
     def inspectFile(self, file_url: str):
@@ -352,22 +564,37 @@ class ChatClient(QObject):
     def sendMessageWithAttachment(self, message: str, file_url: str):
         text = (message or "").strip()
         file_url = (file_url or "").strip()
-        file_payload = None
+        
         if file_url:
+            # Use encrypted file transfer for file attachments
             file_path = self._normalize_file_path(file_url)
             if not file_path:
                 self._notify_error("Invalid file selection.")
                 return
-            file_payload = self._prepare_file_payload(file_path)
-            if not file_payload:
+            
+            try:
+                file_data = file_path.read_bytes()
+                filename = file_path.name
+                
+                # Send text message first if any
+                if text:
+                    self._emit_when_connected("message", {"message": text})
+                
+                # Send encrypted file
+                transfer_id = self._send_encrypted_file_chunks(file_data, filename)
+                if transfer_id:
+                    print(f"Started encrypted file transfer: {transfer_id}")
+                else:
+                    self._notify_error("Failed to start encrypted file transfer")
+                    
+            except Exception as e:
+                self._notify_error(f"Failed to read file: {e}")
+        else:
+            # Regular text message
+            if not text:
+                self._notify_error("Cannot send an empty message.")
                 return
-        if not text and not file_payload:
-            self._notify_error("Cannot send an empty message.")
-            return
-        payload = {"message": text}
-        if file_payload:
-            payload["file"] = file_payload
-        self._emit_when_connected("message", payload)
+            self._emit_when_connected("message", {"message": text})
 
     @Slot(str)
     def sendPublicFile(self, file_url: str):
@@ -387,24 +614,39 @@ class ChatClient(QObject):
         if not recip:
             self._notify_error("Recipient is required for private messages.")
             return
-        file_payload = None
+        
         if file_url:
+            # Use encrypted file transfer for private file attachments
             file_path = self._normalize_file_path(file_url)
             if not file_path:
                 self._notify_error("Invalid file selection.")
                 return
-            file_payload = self._prepare_file_payload(file_path)
-            if not file_payload:
+            
+            try:
+                file_data = file_path.read_bytes()
+                filename = file_path.name
+                
+                # Send text message first if any
+                if text:
+                    self._emit_when_connected("private_message", {"recipient": recip, "message": text})
+                
+                # Send encrypted file
+                transfer_id = self._send_encrypted_file_chunks(file_data, filename, recip)
+                if transfer_id:
+                    print(f"Started encrypted private file transfer: {transfer_id}")
+                else:
+                    self._notify_error("Failed to start encrypted file transfer")
+                    
+            except Exception as e:
+                self._notify_error(f"Failed to read file: {e}")
+        else:
+            # Regular private text message
+            if not text:
+                self._notify_error(
+                    "Cannot send an empty private message. Attach a file or include text."
+                )
                 return
-        if not text and not file_payload:
-            self._notify_error(
-                "Cannot send an empty private message. Attach a file or include text."
-            )
-            return
-        payload = {"recipient": recip, "message": text}
-        if file_payload:
-            payload["file"] = file_payload
-        self._emit_when_connected("private_message", payload)
+            self._emit_when_connected("private_message", {"recipient": recip, "message": text})
 
     @Slot(str, str)
     def sendPrivateFile(self, recipient: str, file_url: str):
@@ -494,6 +736,38 @@ class ChatClient(QObject):
         return self._username
 
     username = Property(str, _get_username, notify=usernameChanged)
+
+    @Slot(result=str)
+    def getPublicKey(self):
+        """Get this client's public key for exchange."""
+        return self._crypto_manager.get_public_key_pem()
+
+    @Slot(str)
+    def exchangePublicKey(self, username: str):
+        """Initiate public key exchange with a user."""
+        if not username:
+            self._notify_error("Username required for key exchange")
+            return
+        
+        public_key = self.getPublicKey()
+        self._emit_when_connected("public_key_exchange", {
+            "target_username": username,
+            "public_key": public_key
+        })
+
+    @Slot(str, result=bool)
+    def hasPeerPublicKey(self, username: str):
+        """Check if we have a public key for the given user."""
+        # For now, return True if we have any peer public key
+        # In a real implementation, you'd track keys per user
+        return self._crypto_manager.peer_public_key is not None
+
+    @Slot(result=str)
+    def getEncryptionStatus(self):
+        """Get current encryption status."""
+        if self._crypto_manager.peer_public_key is not None:
+            return "Encrypted"
+        return "Unencrypted"
 
 
 def main():

@@ -4,7 +4,7 @@ import eventlet
 import logging
 import os
 import threading
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 
 
 MAX_PUBLIC_HISTORY = 200
@@ -45,7 +45,7 @@ def _sanitize_file_payload(data):
 
 
 # Load environment variables from .env file
-load_dotenv()
+#load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -67,6 +67,10 @@ class ChatServer:
         self.public_history = []
         self.private_message_counter = 0
         self.private_messages = {}
+        
+        # File transfer tracking
+        self.active_file_transfers = {}  # transfer_id -> transfer_info
+        self.file_transfer_lock = threading.Lock()
 
         self.register_events()
 
@@ -386,6 +390,152 @@ class ChatServer:
                         {"message_id": message_id},
                         to=sender_sid,
                     )
+
+        @self.sio.event
+        def public_key_exchange(sid, data):
+            """Handle public key exchange between users."""
+            with self.lock:
+                sender_username = self.clients.get(sid, "Unknown")
+            
+            target_username = data.get("target_username")
+            public_key = data.get("public_key")
+            
+            if not target_username or not public_key:
+                self.sio.emit("error", {"message": "Invalid key exchange data"}, to=sid)
+                return
+            
+            # Find target user's SID
+            target_sid = None
+            with self.lock:
+                for client_sid, username in self.clients.items():
+                    if username == target_username:
+                        target_sid = client_sid
+                        break
+            
+            if target_sid:
+                # Forward public key to target user
+                self.sio.emit("public_key_exchange", {
+                    "username": sender_username,
+                    "public_key": public_key
+                }, to=target_sid)
+                logging.info(f"Public key exchange: {sender_username} -> {target_username}")
+            else:
+                self.sio.emit("error", {
+                    "message": f"User '{target_username}' not found for key exchange"
+                }, to=sid)
+
+        @self.sio.event
+        def public_file_chunk(sid, data):
+            """Handle public encrypted file chunks."""
+            self._handle_file_chunk(sid, data, is_private=False)
+
+        @self.sio.event
+        def private_file_chunk(sid, data):
+            """Handle private encrypted file chunks."""
+            self._handle_file_chunk(sid, data, is_private=True)
+
+        @self.sio.event
+        def file_transfer_ack(sid, data):
+            """Handle file transfer acknowledgment."""
+            transfer_id = data.get("transfer_id")
+            success = data.get("success", False)
+            error_msg = data.get("error", "")
+            
+            with self.file_transfer_lock:
+                if transfer_id in self.active_file_transfers:
+                    transfer_info = self.active_file_transfers[transfer_id]
+                    
+                    # Forward acknowledgment to sender
+                    if transfer_info.get("sender_sid"):
+                        self.sio.emit("file_transfer_ack", {
+                            "transfer_id": transfer_id,
+                            "success": success,
+                            "error": error_msg
+                        }, to=transfer_info["sender_sid"])
+                    
+                    # Clean up transfer
+                    del self.active_file_transfers[transfer_id]
+
+    def _handle_file_chunk(self, sid, data, is_private=False):
+        """Handle encrypted file chunks."""
+        transfer_id = data.get("transfer_id")
+        chunk_index = data.get("chunk_index")
+        chunk_data = data.get("chunk_data")
+        is_last_chunk = data.get("is_last_chunk", False)
+        metadata = data.get("metadata")
+        recipient = data.get("recipient") if is_private else None
+        
+        with self.lock:
+            sender_username = self.clients.get(sid, "Unknown")
+        
+        if not all([transfer_id, chunk_index is not None, chunk_data]):
+            self.sio.emit("error", {"message": "Invalid file chunk"}, to=sid)
+            return
+        
+        with self.file_transfer_lock:
+            # Initialize transfer tracking
+            if transfer_id not in self.active_file_transfers:
+                self.active_file_transfers[transfer_id] = {
+                    "sender_sid": sid,
+                    "sender_username": sender_username,
+                    "recipient": recipient,
+                    "is_private": is_private,
+                    "total_chunks": 0,
+                    "received_chunks": 0,
+                    "metadata": None
+                }
+            
+            transfer_info = self.active_file_transfers[transfer_id]
+            
+            # Store metadata from first chunk
+            if metadata and chunk_index == 0:
+                transfer_info["metadata"] = metadata
+                transfer_info["total_chunks"] = metadata.get("total_chunks", 0)
+                transfer_info["encrypted_aes_key"] = data.get("encrypted_aes_key")
+                transfer_info["iv"] = data.get("iv")
+            
+            transfer_info["received_chunks"] += 1
+            
+            # Prepare chunk data for forwarding
+            chunk_payload = {
+                "transfer_id": transfer_id,
+                "chunk_index": chunk_index,
+                "chunk_data": chunk_data,
+                "is_last_chunk": is_last_chunk
+            }
+            
+            # Add metadata to first chunk
+            if chunk_index == 0:
+                chunk_payload["metadata"] = transfer_info.get("metadata")
+                chunk_payload["encrypted_aes_key"] = transfer_info.get("encrypted_aes_key")
+                chunk_payload["iv"] = transfer_info.get("iv")
+            
+            # Forward chunk to appropriate recipients
+            if is_private and recipient:
+                # Find recipient's SID
+                recipient_sid = None
+                with self.lock:
+                    for client_sid, username in self.clients.items():
+                        if username == recipient:
+                            recipient_sid = client_sid
+                            break
+                
+                if recipient_sid:
+                    self.sio.emit("file_chunk", chunk_payload, to=recipient_sid)
+                    logging.info(f"Private file chunk forwarded: {sender_username} -> {recipient}")
+                else:
+                    self.sio.emit("error", {
+                        "message": f"Recipient '{recipient}' not found"
+                    }, to=sid)
+            else:
+                # Broadcast to all clients (public file)
+                self.sio.emit("file_chunk", chunk_payload)
+                logging.info(f"Public file chunk broadcasted from {sender_username}")
+            
+            # Check if transfer is complete
+            if transfer_info["received_chunks"] >= transfer_info["total_chunks"]:
+                logging.info(f"File transfer complete: {transfer_id}")
+                # Transfer will be cleaned up when acknowledgment is received
 
 
 if __name__ == "__main__":
