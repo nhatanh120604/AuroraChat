@@ -257,7 +257,7 @@ ApplicationWindow {
         }
     }
 
-    function appendPrivateMessage(peer, author, text, isOutgoing, messageId, status, filePayload) {
+    function appendPrivateMessage(peer, author, text, isOutgoing, messageId, status, filePayload, timestamp) {
         if (!peer || peer.length === 0) {
             return
         }
@@ -296,7 +296,8 @@ ApplicationWindow {
             "fileName": fileName,
             "fileMime": fileMime,
             "fileData": fileData,
-            "fileSize": fileSize
+            "fileSize": fileSize,
+            "timestamp": timestamp ? timestamp : Qt.formatDateTime(new Date(), "hh:mm ap")
         })
         var newIndex = model.count - 1
         if (resolvedId > 0) {
@@ -541,9 +542,7 @@ ApplicationWindow {
                     anchors.margins: 28
 
                     GridLayout {
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.fill: parent
                         columns: 2
                         columnSpacing: 28
                         rowSpacing: 0
@@ -2294,44 +2293,74 @@ ApplicationWindow {
                                 }
                             }
 
+                            // Save dialog for choosing download location
+                            Platform.FileDialog {
+                                id: saveAttachmentDialog
+                                title: "Save attachment"
+                                fileMode: Platform.FileDialog.SaveFile
+                                nameFilters: ["All files (*)"]
+                                property string payloadData: ""
+                                onAccepted: {
+                                    var chosen = selectedFile || file || currentFile
+                                    if (!chosen || chosen.length === 0)
+                                        return
+                                    var result = chatClient.saveFileToPath(chosen, payloadData)
+                                    if (result && result.length > 0)
+                                        console.log("[QML] File saved to:", result)
+                                }
+                            }
+
                             Button {
-                                text: "Open"
+                                text: "Download"
                                 focusPolicy: Qt.NoFocus
                                 onClicked: {
-                                    if (!model.fileData || model.fileData.length === 0) {
+                                    if (!model.fileData || model.fileData.length === 0)
                                         return
-                                    }
-                                    var url = chatClient.saveFileToTemp(model.fileName, model.fileData, model.fileMime)
-                                    if (url && url.length > 0) {
-                                        Qt.openUrlExternally(url)
-                                    }
+                                    saveAttachmentDialog.payloadData = model.fileData
+                                    // Suggest the original filename
+                                    try { saveAttachmentDialog.currentFile = model.fileName } catch(e) {}
+                                    saveAttachmentDialog.open()
                                 }
                             }
                         }
                     }
 
-                    Text {
+                    RowLayout {
                         width: parent.width
-                        color: palette.textSecondary
-                        font.pixelSize: 11
-                        horizontalAlignment: Text.AlignRight
-                        text: {
-                            if (!model.isPrivate || model.isOutgoing !== true) {
+                        Layout.fillWidth: true
+                        
+                        // Left-aligned timestamp
+                        Text {
+                            color: palette.textSecondary
+                            font.pixelSize: 11
+                            text: model.timestamp ? (model.timestamp.indexOf('T') >= 0 ? model.timestamp.split('T')[1].slice(0,5) : model.timestamp) : ""
+                            Layout.alignment: Qt.AlignLeft
+                        }
+
+                        // Right-aligned private status
+                        Text {
+                            Layout.fillWidth: true
+                            color: palette.textSecondary
+                            font.pixelSize: 11
+                            horizontalAlignment: Text.AlignRight
+                            text: {
+                                if (!model.isPrivate || model.isOutgoing !== true) {
+                                    return ""
+                                }
+                                var state = model.status ? model.status.toLowerCase() : ""
+                                if (state === "seen") {
+                                    return "\u2713\u2713 Seen"
+                                }
+                                if (state === "delivered") {
+                                    return "\u2713 Delivered"
+                                }
+                                if (state === "sent") {
+                                    return "\u2713 Sent"
+                                }
                                 return ""
                             }
-                            var state = model.status ? model.status.toLowerCase() : ""
-                            if (state === "seen") {
-                                return "\u2713\u2713 Seen"
-                            }
-                            if (state === "delivered") {
-                                return "\u2713 Delivered"
-                            }
-                            if (state === "sent") {
-                                return "\u2713 Sent"
-                            }
-                            return ""
+                            visible: text && text.length > 0
                         }
-                        visible: text && text.length > 0
                     }
                 }
             }
@@ -2480,6 +2509,15 @@ ApplicationWindow {
         target: chatClient
 
         function onMessageReceived(username, message, file) {
+            console.log("[QML] onMessageReceived user=", username,
+                        "textLen=", message ? message.length : 0,
+                        "file?=", !!file,
+                        "fileName=", (file && file.name) ? file.name : "",
+                        "size=", (file && file.size) ? file.size : 0)
+            if (file && (file.is_private === true || (file.recipient && file.recipient.length > 0))) {
+                // This is a private file payload; it will be handled by private handlers
+                return
+            }
             messagesModel.append({
                 "user": username,
                 "text": message,
@@ -2487,7 +2525,8 @@ ApplicationWindow {
                 "fileName": file && file.name ? file.name : "",
                 "fileMime": file && file.mime ? file.mime : "",
                 "fileData": file && file.data ? file.data : "",
-                "fileSize": file && file.size ? Number(file.size) : 0
+                "fileSize": file && file.size ? Number(file.size) : 0,
+                "timestamp": Qt.formatDateTime(new Date(), "hh:mm ap")
             })
             window.updatePublicTyping(username, false)
             var idx = window.conversationIndex("public")
@@ -2518,7 +2557,8 @@ ApplicationWindow {
                     "fileName": entry.file && entry.file.name ? entry.file.name : "",
                     "fileMime": entry.file && entry.file.mime ? entry.file.mime : "",
                     "fileData": entry.file && entry.file.data ? entry.file.data : "",
-                    "fileSize": entry.file && entry.file.size ? Number(entry.file.size) : 0
+                    "fileSize": entry.file && entry.file.size ? Number(entry.file.size) : 0,
+                    "timestamp": entry.timestamp ? entry.timestamp : ""
                 })
             }
             window.setConversationUnread("public", false)
@@ -2535,7 +2575,7 @@ ApplicationWindow {
             if (!peer || peer.length === 0) {
                 return
             }
-            window.appendPrivateMessage(peer, sender, message, isOutgoing, messageId, status, file)
+            window.appendPrivateMessage(peer, sender, message, isOutgoing, messageId, status, file, "")
             if (!isOutgoing) {
                 window.updatePrivateTyping(sender, false)
             }
@@ -2546,7 +2586,29 @@ ApplicationWindow {
             if (!peer || peer.length === 0) {
                 return
             }
-            window.appendPrivateMessage(peer, sender, message, true, messageId, status, file)
+            window.appendPrivateMessage(peer, sender, message, true, messageId, status, file, "")
+            window.setConversationUnread(peer, false)
+        }
+
+        function onPrivateMessageReceivedEx(sender, recipient, message, messageId, status, file, timestamp) {
+            var currentUser = chatClient.username
+            var isOutgoing = sender === currentUser
+            var peer = isOutgoing ? recipient : sender
+            if (!peer || peer.length === 0) {
+                return
+            }
+            window.appendPrivateMessage(peer, sender, message, isOutgoing, messageId, status, file, timestamp)
+            if (!isOutgoing) {
+                window.updatePrivateTyping(sender, false)
+            }
+        }
+
+        function onPrivateMessageSentEx(sender, recipient, message, messageId, status, file, timestamp) {
+            var peer = recipient
+            if (!peer || peer.length === 0) {
+                return
+            }
+            window.appendPrivateMessage(peer, sender, message, true, messageId, status, file, timestamp)
             window.setConversationUnread(peer, false)
         }
 

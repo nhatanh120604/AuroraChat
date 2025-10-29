@@ -5,6 +5,13 @@ import logging
 import os
 import threading
 #from dotenv import load_dotenv
+import base64
+from datetime import datetime, timezone
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
 MAX_PUBLIC_HISTORY = 200
@@ -67,12 +74,38 @@ class ChatServer:
         self.public_history = []
         self.private_message_counter = 0
         self.private_messages = {}
+        self.session_keys = {}  # sid -> AES key (bytes)
+        # Uploads directory for caching plaintext files
+        self.upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
+        try:
+            os.makedirs(self.upload_dir, exist_ok=True)
+        except OSError:
+            pass
         
         # File transfer tracking
         self.active_file_transfers = {}  # transfer_id -> transfer_info
         self.file_transfer_lock = threading.Lock()
 
         self.register_events()
+
+    @staticmethod
+    def _load_private_key():
+        base_dir = os.path.dirname(__file__)
+        priv_path = os.path.join(base_dir, "private_key.pem")
+        with open(priv_path, "rb") as f:
+            return serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+
+    @staticmethod
+    def _pkcs7_unpad(padded: bytes) -> bytes:
+        pad_len = padded[-1]
+        return padded[:-pad_len]
+
+    @staticmethod
+    def _aes_decrypt(ciphertext: bytes, key: bytes, iv: bytes) -> bytes:
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+        decryptor = cipher.decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+        return ChatServer._pkcs7_unpad(padded)
 
     def register_events(self):
 
@@ -83,12 +116,19 @@ class ChatServer:
                 history_snapshot = list(self.public_history)
             if history_snapshot:
                 self.sio.emit("chat_history", {"messages": history_snapshot}, to=sid)
+            # Ensure private key is loaded
+            try:
+                if not hasattr(self, "_private_key"):
+                    self._private_key = self._load_private_key()
+            except Exception as e:
+                logging.error(f"Failed to load server private key: {e}")
 
         @self.sio.event
         def disconnect(sid):
             logging.info(f"Client disconnected: {sid}")
             with self.lock:
                 username = self.clients.pop(sid, None)
+                self.session_keys.pop(sid, None)
                 if username:
                     # Notify remaining clients by sending the updated user list
                     self.sio.emit(
@@ -113,8 +153,8 @@ class ChatServer:
             username = username.strip()
 
             with self.lock:
-                # Enforce unique usernames
-                if username in self.clients.values():
+                # Enforce unique usernames (case-insensitive)
+                if any((name or "").lower() == username.lower() for name in self.clients.values()):
                     self.sio.emit(
                         "error",
                         {"message": f"Username '{username}' is already taken."},
@@ -137,13 +177,53 @@ class ChatServer:
                 self.sio.emit("chat_history", {"messages": history_snapshot}, to=sid)
 
         @self.sio.event
+        def session_key(sid, data):
+            enc_key_b64 = data.get("encrypted_aes_key")
+            if not enc_key_b64:
+                self.sio.emit("error", {"message": "Missing encrypted AES key."}, to=sid)
+                return
+            try:
+                enc_bytes = base64.b64decode(enc_key_b64.encode("utf-8"))
+                aes_key = self._private_key.decrypt(
+                    enc_bytes,
+                    padding.OAEP(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        algorithm=hashes.SHA256(),
+                        label=None,
+                    ),
+                )
+                with self.lock:
+                    self.session_keys[sid] = aes_key
+                logging.info(f"Stored session AES key for {sid}")
+                # Acknowledge to client so it can start sending encrypted payloads
+                self.sio.emit("session_key_ok", {"ok": True}, to=sid)
+            except Exception as e:
+                logging.error(f"Failed to decrypt session key from {sid}: {e}")
+                self.sio.emit("error", {"message": "Invalid session key."}, to=sid)
+
+        @self.sio.event
         def message(sid, data):
             """Handle incoming messages from a client and broadcast them."""
             with self.lock:
                 sender_username = self.clients.get(sid, "Unknown")
 
-            message_text = data.get("message")
-            file_payload = _sanitize_file_payload(data.get("file"))
+            # Decrypt if encrypted
+            file_payload = None
+            if data.get("enc"):
+                try:
+                    key = self.session_keys.get(sid)
+                    if not key:
+                        self.sio.emit("error", {"message": "Session key not found."}, to=sid)
+                        return
+                    ct = base64.b64decode(data.get("ciphertext", ""))
+                    iv = base64.b64decode(data.get("iv", ""))
+                    message_text = ChatServer._aes_decrypt(ct, key, iv).decode("utf-8", errors="replace")
+                except Exception as e:
+                    self.sio.emit("error", {"message": f"Decrypt failed: {e}"}, to=sid)
+                    return
+            else:
+                message_text = data.get("message")
+                file_payload = _sanitize_file_payload(data.get("file"))
 
             if isinstance(message_text, str):
                 message_text = message_text.strip()
@@ -157,16 +237,16 @@ class ChatServer:
                 )
                 return
 
-            # The data from the test client is the entire payload.
-            # We need to add the sender's username and broadcast it.
+            # The data from the client is the entire payload. Add sender and server timestamp (if missing) and broadcast.
             if data:
+                server_ts = data.get("timestamp")
+                if not server_ts:
+                    server_ts = datetime.now(timezone.utc).isoformat()
                 # Prepare the payload to be sent to all clients
                 broadcast_data = {
                     "username": sender_username,
                     "message": message_text,
-                    "timestamp": data.get(
-                        "timestamp"
-                    ),  # Forward the timestamp for latency calculation
+                    "timestamp": server_ts,
                 }
                 if file_payload:
                     broadcast_data["file"] = file_payload
@@ -186,8 +266,23 @@ class ChatServer:
                 sender_username = self.clients.get(sid, "Unknown")
 
             recipient_username = data.get("recipient")
-            message = data.get("message")
-            file_payload = _sanitize_file_payload(data.get("file"))
+            # Decrypt if encrypted
+            file_payload = None
+            if data.get("enc"):
+                try:
+                    key = self.session_keys.get(sid)
+                    if not key:
+                        self.sio.emit("error", {"message": "Session key not found."}, to=sid)
+                        return
+                    ct = base64.b64decode(data.get("ciphertext", ""))
+                    iv = base64.b64decode(data.get("iv", ""))
+                    message = ChatServer._aes_decrypt(ct, key, iv).decode("utf-8", errors="replace")
+                except Exception as e:
+                    self.sio.emit("error", {"message": f"Decrypt failed: {e}"}, to=sid)
+                    return
+            else:
+                message = data.get("message")
+                file_payload = _sanitize_file_payload(data.get("file"))
 
             # Input validation
             if (
@@ -241,6 +336,9 @@ class ChatServer:
                             break
 
                 if recipient_sid:
+                    server_ts = data.get("timestamp")
+                    if not server_ts:
+                        server_ts = datetime.now(timezone.utc).isoformat()
                     with self.lock:
                         self.private_message_counter += 1
                         message_id = self.private_message_counter
@@ -255,10 +353,8 @@ class ChatServer:
                         "sender": sender_username,
                         "recipient": recipient_username,
                         "message": message,
+                        "timestamp": server_ts,
                     }
-                    # Forward timestamp if present for latency calculation
-                    if "timestamp" in data:
-                        payload["timestamp"] = data["timestamp"]
 
                     payload["message_id"] = message_id
                     recipient_payload = dict(payload)
@@ -391,38 +487,7 @@ class ChatServer:
                         to=sender_sid,
                     )
 
-        @self.sio.event
-        def public_key_exchange(sid, data):
-            """Handle public key exchange between users."""
-            with self.lock:
-                sender_username = self.clients.get(sid, "Unknown")
-            
-            target_username = data.get("target_username")
-            public_key = data.get("public_key")
-            
-            if not target_username or not public_key:
-                self.sio.emit("error", {"message": "Invalid key exchange data"}, to=sid)
-                return
-            
-            # Find target user's SID
-            target_sid = None
-            with self.lock:
-                for client_sid, username in self.clients.items():
-                    if username == target_username:
-                        target_sid = client_sid
-                        break
-            
-            if target_sid:
-                # Forward public key to target user
-                self.sio.emit("public_key_exchange", {
-                    "username": sender_username,
-                    "public_key": public_key
-                }, to=target_sid)
-                logging.info(f"Public key exchange: {sender_username} -> {target_username}")
-            else:
-                self.sio.emit("error", {
-                    "message": f"User '{target_username}' not found for key exchange"
-                }, to=sid)
+        # Removed user-to-user public key exchange in server-managed scheme
 
         @self.sio.event
         def public_file_chunk(sid, data):
@@ -456,6 +521,10 @@ class ChatServer:
                     # Clean up transfer
                     del self.active_file_transfers[transfer_id]
 
+        # Deprecated encrypted_message route removed
+
+        # Deprecated encrypted_private_message route removed
+
     def _handle_file_chunk(self, sid, data, is_private=False):
         """Handle encrypted file chunks."""
         transfer_id = data.get("transfer_id")
@@ -482,7 +551,8 @@ class ChatServer:
                     "is_private": is_private,
                     "total_chunks": 0,
                     "received_chunks": 0,
-                    "metadata": None
+                    "metadata": None,
+                    "encrypted_chunks": {},
                 }
             
             transfer_info = self.active_file_transfers[transfer_id]
@@ -491,51 +561,124 @@ class ChatServer:
             if metadata and chunk_index == 0:
                 transfer_info["metadata"] = metadata
                 transfer_info["total_chunks"] = metadata.get("total_chunks", 0)
-                transfer_info["encrypted_aes_key"] = data.get("encrypted_aes_key")
-                transfer_info["iv"] = data.get("iv")
+                transfer_info["iv"] = metadata.get("iv")
             
             transfer_info["received_chunks"] += 1
+            transfer_info["encrypted_chunks"][chunk_index] = base64.b64decode(chunk_data)
             
-            # Prepare chunk data for forwarding
-            chunk_payload = {
-                "transfer_id": transfer_id,
-                "chunk_index": chunk_index,
-                "chunk_data": chunk_data,
-                "is_last_chunk": is_last_chunk
-            }
-            
-            # Add metadata to first chunk
-            if chunk_index == 0:
-                chunk_payload["metadata"] = transfer_info.get("metadata")
-                chunk_payload["encrypted_aes_key"] = transfer_info.get("encrypted_aes_key")
-                chunk_payload["iv"] = transfer_info.get("iv")
-            
-            # Forward chunk to appropriate recipients
-            if is_private and recipient:
-                # Find recipient's SID
-                recipient_sid = None
-                with self.lock:
-                    for client_sid, username in self.clients.items():
-                        if username == recipient:
-                            recipient_sid = client_sid
-                            break
-                
-                if recipient_sid:
-                    self.sio.emit("file_chunk", chunk_payload, to=recipient_sid)
-                    logging.info(f"Private file chunk forwarded: {sender_username} -> {recipient}")
-                else:
-                    self.sio.emit("error", {
-                        "message": f"Recipient '{recipient}' not found"
-                    }, to=sid)
-            else:
-                # Broadcast to all clients (public file)
-                self.sio.emit("file_chunk", chunk_payload)
-                logging.info(f"Public file chunk broadcasted from {sender_username}")
-            
-            # Check if transfer is complete
-            if transfer_info["received_chunks"] >= transfer_info["total_chunks"]:
-                logging.info(f"File transfer complete: {transfer_id}")
-                # Transfer will be cleaned up when acknowledgment is received
+            # If complete, decrypt and broadcast plaintext chunks
+            if transfer_info["received_chunks"] >= transfer_info["total_chunks"] and transfer_info["total_chunks"] > 0:
+                try:
+                    key = self.session_keys.get(sid)
+                    if not key:
+                        self.sio.emit("error", {"message": "Session key not found for file."}, to=sid)
+                        del self.active_file_transfers[transfer_id]
+                        return
+                    iv_b64 = transfer_info.get("iv") or ""
+                    iv = base64.b64decode(iv_b64)
+                    # Reassemble ciphertext
+                    chunks_dict = transfer_info["encrypted_chunks"]
+                    ciphertext = b"".join(chunks_dict[i] for i in sorted(chunks_dict.keys()))
+                    plaintext = ChatServer._aes_decrypt(ciphertext, key, iv)
+
+                    # Cache plaintext to disk
+                    filename = transfer_info["metadata"].get("filename", "file")
+                    safe_name = os.path.basename(filename) or "file"
+                    out_path = os.path.join(self.upload_dir, f"{transfer_id}_{safe_name}")
+                    try:
+                        with open(out_path, "wb") as f:
+                            f.write(plaintext)
+                    except OSError as e:
+                        logging.error(f"Failed to cache file: {e}")
+                        self.sio.emit("error", {"message": f"Server failed caching file: {e}"}, to=sid)
+                        del self.active_file_transfers[transfer_id]
+                        return
+
+                    # Stream plaintext from disk in chunks
+                    chunk_size = transfer_info["metadata"].get("chunk_size", 64 * 1024)
+                    total_size = len(plaintext)
+                    total_chunks = max(1, (total_size + chunk_size - 1) // chunk_size)
+
+                    def emit_first_and_get_target():
+                        server_ts = datetime.now(timezone.utc).isoformat()
+                        first_chunk = b""
+                        try:
+                            with open(out_path, "rb") as f:
+                                first_chunk = f.read(chunk_size)
+                        except OSError:
+                            pass
+                        first_payload = {
+                            "transfer_id": transfer_id,
+                            "chunk_index": 0,
+                            "chunk_data": base64.b64encode(first_chunk).decode("utf-8"),
+                            "is_last_chunk": total_chunks == 1,
+                            "metadata": {
+                                "filename": safe_name,
+                                "total_size": total_size,
+                                "total_chunks": total_chunks,
+                                "chunk_size": chunk_size,
+                                "username": sender_username,
+                                "timestamp": server_ts,
+                                "is_private": bool(transfer_info["is_private"]),
+                                "recipient": transfer_info["recipient"] if transfer_info["is_private"] else "",
+                            },
+                        }
+                        if transfer_info["is_private"] and transfer_info["recipient"]:
+                            target_sid = None
+                            with self.lock:
+                                for client_sid, username in self.clients.items():
+                                    if username == transfer_info["recipient"]:
+                                        target_sid = client_sid
+                                        break
+                            if target_sid:
+                                self.sio.emit("file_chunk", first_payload, to=target_sid)
+                            else:
+                                self.sio.emit("error", {"message": f"Recipient '{transfer_info['recipient']}' not found"}, to=sid)
+                                return None
+                            return target_sid
+                        else:
+                            self.sio.emit("file_chunk", first_payload)
+                            return "__broadcast__"
+
+                    target = emit_first_and_get_target()
+                    if not target:
+                        del self.active_file_transfers[transfer_id]
+                        return
+
+                    # Remaining chunks
+                    try:
+                        with open(out_path, "rb") as f:
+                            f.seek(chunk_size)
+                            index = 1
+                            while True:
+                                buf = f.read(chunk_size)
+                                if not buf:
+                                    break
+                                payload = {
+                                    "transfer_id": transfer_id,
+                                    "chunk_index": index,
+                                    "chunk_data": base64.b64encode(buf).decode("utf-8"),
+                                    "is_last_chunk": index == total_chunks - 1,
+                                }
+                                if target == "__broadcast__":
+                                    self.sio.emit("file_chunk", payload)
+                                else:
+                                    self.sio.emit("file_chunk", payload, to=target)
+                                index += 1
+                    except OSError as e:
+                        logging.error(f"Failed streaming file: {e}")
+                        self.sio.emit("error", {"message": f"Server streaming error: {e}"}, to=sid)
+                        del self.active_file_transfers[transfer_id]
+                        return
+
+                    logging.info(f"Decrypted file broadcast complete: {transfer_id}")
+                except Exception as e:
+                    logging.error(f"File decrypt/broadcast failed: {e}")
+                    self.sio.emit("error", {"message": f"File decrypt failed: {e}"}, to=sid)
+                finally:
+                    # Clean up transfer tracking
+                    if transfer_id in self.active_file_transfers:
+                        del self.active_file_transfers[transfer_id]
 
 
 if __name__ == "__main__":
