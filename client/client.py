@@ -80,6 +80,7 @@ class ChatClient(QObject):
         self._active_transfers = {}  # transfer_id -> transfer_data
         self._received_chunks = {}  # transfer_id -> {chunk_index: data}
         self._transfer_lock = threading.Lock()
+        self._completed_transfers = set()
         self._debug_enabled = True
         
         self._setup_handlers()
@@ -276,6 +277,9 @@ class ChatClient(QObject):
 
             ready_to_reassemble = False
             with self._transfer_lock:
+                if transfer_id in self._completed_transfers:
+                    # Ignore any late chunks after completion
+                    return
                 if transfer_id not in self._received_chunks:
                     self._received_chunks[transfer_id] = {}
                 
@@ -503,6 +507,7 @@ class ChatClient(QObject):
                     "data": base64.b64encode(data_bytes).decode('ascii'),
                     "is_private": is_private,
                     "recipient": recipient,
+                    "transfer_id": transfer_id,
                 }
                 username = metadata.get("username", "Unknown")
                 # Emit directly; Qt will queue the signal to the GUI thread.
@@ -517,8 +522,8 @@ class ChatClient(QObject):
                     # Determine outgoing vs incoming
                     is_outgoing = (self._username and sender == self._username)
                     if is_outgoing:
-                        # Sent by us
-                        self.privateMessageSentEx.emit(sender, recipient or "", "", 0, "sent", file_payload, ts)
+                        # Sent by us: we already appended optimistically when sending; avoid duplicate
+                        self._dbg("skip duplicate append for sender private file:", transfer_id)
                     else:
                         # Received by us
                         self.privateMessageReceivedEx.emit(sender, recipient or self._username, "", 0, "delivered", file_payload, ts)
@@ -526,6 +531,12 @@ class ChatClient(QObject):
                     # Public feed
                     self.messageReceived.emit(username, "", file_payload)
                     self.messageReceivedEx.emit(username, "", file_payload, ts)
+
+                # Mark completed and cleanup to avoid duplicate reassembly
+                with self._transfer_lock:
+                    self._completed_transfers.add(transfer_id)
+                    self._active_transfers.pop(transfer_id, None)
+                    self._received_chunks.pop(transfer_id, None)
                 
         except Exception as e:
             self.fileTransferError.emit(transfer_id, f"Failed to reassemble file: {e}")
@@ -580,6 +591,7 @@ class ChatClient(QObject):
                     "data": base64.b64encode(file_data).decode('ascii'),
                     "is_private": True,
                     "recipient": recipient,
+                    "transfer_id": transfer_id,
                 }
                 from datetime import datetime, timezone
                 ts = datetime.now(timezone.utc).isoformat()

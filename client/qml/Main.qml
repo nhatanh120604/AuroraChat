@@ -38,6 +38,7 @@ ApplicationWindow {
     }
 
     property var privateMessageModels: ({})
+    property var privateSeenTransfers: ({}) // peer -> set/dict of transfer_ids
     property var privateDrafts: ({})
     property string publicDraft: ""
     property var conversationPages: ({})
@@ -49,6 +50,17 @@ ApplicationWindow {
     property var emojiOptions: ["😀", "😂", "😍", "😎", "👍", "🙏", "🎉", "❤️", "🔥", "🤔", "🥳", "🤩", "😢", "😡"]
     property var publicPendingFile: null
     property var privatePendingFiles: ({})
+
+    function formatTimestamp(ts) {
+        try {
+            if (ts && ts.length > 0) {
+                var d = new Date(ts)
+                if (!isNaN(d.getTime()))
+                    return Qt.formatDateTime(d, "hh:mm ap")
+            }
+        } catch(e) {}
+        return Qt.formatDateTime(new Date(), "hh:mm ap")
+    }
 
     function ensurePrivateModel(peer) {
         if (!peer) {
@@ -267,12 +279,21 @@ ApplicationWindow {
                 return
             }
         }
+        // De-dup by transfer_id if present
+        var tid = (filePayload && filePayload.transfer_id) ? String(filePayload.transfer_id) : ""
+        if (tid && privateSeenTransfers[peer] && privateSeenTransfers[peer][tid]) {
+            return
+        }
         if (!author || author.length === 0) {
             author = isOutgoing === true ? (chatClient.username && chatClient.username.length > 0 ? chatClient.username : "You") : peer
         }
         var model = ensurePrivateModel(peer)
         if (!model) {
             return
+        }
+        if (tid) {
+            if (!privateSeenTransfers[peer]) privateSeenTransfers[peer] = {}
+            privateSeenTransfers[peer][tid] = true
         }
         if (conversationIndex(peer) === -1) {
             conversationTabsModel.append({"key": peer, "title": peer, "isPrivate": true, "hasUnread": false})
@@ -2333,7 +2354,7 @@ ApplicationWindow {
                         Text {
                             color: palette.textSecondary
                             font.pixelSize: 11
-                            text: model.timestamp ? (model.timestamp.indexOf('T') >= 0 ? model.timestamp.split('T')[1].slice(0,5) : model.timestamp) : ""
+                            text: model.timestamp ? model.timestamp : ""
                             Layout.alignment: Qt.AlignLeft
                         }
 
@@ -2526,7 +2547,7 @@ ApplicationWindow {
                 "fileMime": file && file.mime ? file.mime : "",
                 "fileData": file && file.data ? file.data : "",
                 "fileSize": file && file.size ? Number(file.size) : 0,
-                "timestamp": Qt.formatDateTime(new Date(), "hh:mm ap")
+                "timestamp": formatTimestamp("")
             })
             window.updatePublicTyping(username, false)
             var idx = window.conversationIndex("public")
@@ -2558,7 +2579,7 @@ ApplicationWindow {
                     "fileMime": entry.file && entry.file.mime ? entry.file.mime : "",
                     "fileData": entry.file && entry.file.data ? entry.file.data : "",
                     "fileSize": entry.file && entry.file.size ? Number(entry.file.size) : 0,
-                    "timestamp": entry.timestamp ? entry.timestamp : ""
+                    "timestamp": formatTimestamp(entry.timestamp ? entry.timestamp : "")
                 })
             }
             window.setConversationUnread("public", false)
@@ -2575,7 +2596,7 @@ ApplicationWindow {
             if (!peer || peer.length === 0) {
                 return
             }
-            window.appendPrivateMessage(peer, sender, message, isOutgoing, messageId, status, file, "")
+            window.appendPrivateMessage(peer, sender, message, isOutgoing, messageId, status, file, formatTimestamp(""))
             if (!isOutgoing) {
                 window.updatePrivateTyping(sender, false)
             }
@@ -2586,7 +2607,7 @@ ApplicationWindow {
             if (!peer || peer.length === 0) {
                 return
             }
-            window.appendPrivateMessage(peer, sender, message, true, messageId, status, file, "")
+            window.appendPrivateMessage(peer, sender, message, true, messageId, status, file, formatTimestamp(""))
             window.setConversationUnread(peer, false)
         }
 
@@ -2597,7 +2618,7 @@ ApplicationWindow {
             if (!peer || peer.length === 0) {
                 return
             }
-            window.appendPrivateMessage(peer, sender, message, isOutgoing, messageId, status, file, timestamp)
+            window.appendPrivateMessage(peer, sender, message, isOutgoing, messageId, status, file, formatTimestamp(timestamp))
             if (!isOutgoing) {
                 window.updatePrivateTyping(sender, false)
             }
@@ -2608,7 +2629,7 @@ ApplicationWindow {
             if (!peer || peer.length === 0) {
                 return
             }
-            window.appendPrivateMessage(peer, sender, message, true, messageId, status, file, timestamp)
+            window.appendPrivateMessage(peer, sender, message, true, messageId, status, file, formatTimestamp(timestamp))
             window.setConversationUnread(peer, false)
         }
 
