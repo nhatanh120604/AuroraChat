@@ -2349,7 +2349,7 @@ ApplicationWindow {
                     RowLayout {
                         width: parent.width
                         Layout.fillWidth: true
-                        
+
                         // Left-aligned timestamp
                         Text {
                             color: palette.textSecondary
