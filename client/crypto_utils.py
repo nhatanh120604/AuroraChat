@@ -6,28 +6,52 @@ session AES key using the server's public key.
 import os
 import base64
 import secrets
-from typing import Tuple
+from typing import Tuple, Optional
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
-def load_server_public_key_pem() -> bytes:
+def fetch_server_public_key(server_url: str) -> Optional[bytes]:
+    """Fetch server's public key from /public_key endpoint."""
+    try:
+        import urllib.request
+        url = f"{server_url.rstrip('/')}/public_key"
+        with urllib.request.urlopen(url, timeout=5) as response:
+            return response.read()
+    except Exception:
+        return None
+
+
+def load_server_public_key_pem(server_url: Optional[str] = None) -> bytes:
+    """Load server public key: first try fetching from server, then fallback to local file."""
+    # Try fetching from server if URL provided
+    if server_url:
+        fetched = fetch_server_public_key(server_url)
+        if fetched:
+            return fetched
+    
+    # Fallback to local file
     base_dir = os.path.dirname(__file__)
     pub_path = os.path.join(base_dir, "public_key.pem")
-    with open(pub_path, "rb") as f:
-        return f.read()
+    if os.path.exists(pub_path):
+        with open(pub_path, "rb") as f:
+            return f.read()
+    
+    raise FileNotFoundError(
+        "Server public key not found. Either set CHAT_SERVER_URL or place public_key.pem in client/"
+    )
 
 
-def rsa_encrypt_with_server_public_key(data: bytes) -> str:
-    pem = load_server_public_key_pem()
+def rsa_encrypt_with_server_public_key(data: bytes, server_url: Optional[str] = None) -> str:
+    pem = load_server_public_key_pem(server_url)
     public_key = serialization.load_pem_public_key(pem, backend=default_backend())
     encrypted = public_key.encrypt(
         data,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
             label=None,
         ),
     )
