@@ -149,6 +149,20 @@ class ChatServer:
                 logging.error(f"Failed to load server private key: {e}")
         
         # Health and public key endpoints
+        @self.app.route("/")
+        def index():
+            return """
+            <html>
+            <head><title>FUV Chat Backend</title></head>
+            <body style="font-family: Arial, sans-serif; text-align: center; margin-top: 50px;">
+                <h1>🟢 FUV Chat Backend Running</h1>
+                <p>The chat server is online and ready to accept connections.</p>
+                <hr>
+                <p><a href="/health">Health Check</a> | <a href="/public_key">Public Key</a></p>
+            </body>
+            </html>
+            """, 200
+
         @self.app.route("/health")
         def health():
             return "ok", 200
@@ -740,29 +754,13 @@ if __name__ == "__main__":
     HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
     logging.info(f"Starting server on {HOST}:{PORT}")
     
-    # Use gunicorn with gevent worker for Python 3.12+ compatibility
+    # Use gevent WSGI server for production deployments
     try:
-        from gunicorn.app.wsgiapp import WSGIApplication
-        
-        class StandaloneApplication(WSGIApplication):
-            def init(self, parser, opts, args):
-                self.cfg.set("bind", f"{HOST}:{PORT}")
-                self.cfg.set("worker_class", "gevent")
-                self.cfg.set("workers", 1)
-                self.cfg.set("worker_connections", 1000)
-                self.cfg.set("log_level", "info")
-            
-            def load(self):
-                return server.app
-        
-        StandaloneApplication().run()
+        from gevent import pywsgi
+        logging.info("Using gevent WSGI server")
+        http_server = pywsgi.WSGIServer((HOST, PORT), server.app)
+        http_server.serve_forever()
     except ImportError:
-        # Fallback: use gevent WSGI server directly
-        try:
-            from gevent import pywsgi
-            logging.info("Using gevent WSGI server")
-            http_server = pywsgi.WSGIServer((HOST, PORT), server.app)
-            http_server.serve_forever()
-        except ImportError:
-            logging.error("Neither gunicorn nor gevent available. Please install: pip install gunicorn gevent")
-            raise
+        # Fallback to Flask dev server (not for production)
+        logging.warning("gevent not available, using Flask dev server")
+        server.app.run(host=HOST, port=PORT, debug=False)

@@ -1,0 +1,1 @@
+CHAT_SERVER_URL=https://fuv-chatapp-server.onrender.com

@@ -62,7 +62,10 @@ class ChatClient(QObject):
         # Resolve server URL from environment (.env supported)
         try:
             from dotenv import load_dotenv  # type: ignore
-            load_dotenv()
+            # Load .env from client directory
+            client_dir = os.path.dirname(os.path.abspath(__file__))
+            env_path = os.path.join(client_dir, '.env')
+            load_dotenv(env_path)
         except Exception:
             pass
         resolved_url = url or os.environ.get("CHAT_SERVER_URL") or "http://localhost:5000"
