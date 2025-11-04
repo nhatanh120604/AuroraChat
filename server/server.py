@@ -1,6 +1,5 @@
 import socketio
 from flask import Flask
-import eventlet
 import logging
 import os
 import threading
@@ -10,7 +9,7 @@ import binascii
 from datetime import datetime, timezone
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -129,8 +128,34 @@ class ChatServer:
     def _load_private_key():
         base_dir = os.path.dirname(__file__)
         priv_path = os.path.join(base_dir, "private_key.pem")
-        with open(priv_path, "rb") as f:
-            return serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+        if os.path.exists(priv_path):
+            with open(priv_path, "rb") as f:
+                return serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+        # Generate a new RSA key if missing (first boot)
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+        private_pem = key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        try:
+            with open(priv_path, "wb") as f:
+                f.write(private_pem)
+        except OSError:
+            pass
+        # Also emit public key to logs to help distribute to clients
+        public_pem = key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        logging.warning("Generated new server RSA key. Distribute this public key to clients:\n%s", public_pem.decode("utf-8"))
+        # Optionally write server/public_key.pem for convenience
+        try:
+            with open(os.path.join(base_dir, "public_key.pem"), "wb") as f:
+                f.write(public_pem)
+        except OSError:
+            pass
+        return key
 
     @staticmethod
     def _pkcs7_unpad(padded: bytes) -> bytes:
@@ -159,6 +184,36 @@ class ChatServer:
                     self._private_key = self._load_private_key()
             except Exception as e:
                 logging.error(f"Failed to load server private key: {e}")
+        
+        # Health and public key endpoints
+        @self.app.route("/")
+        def index():
+            return """
+            <html>
+            <head><title>FUV Chat Backend</title></head>
+            <body style="font-family: Arial, sans-serif; text-align: center; margin-top: 50px;">
+                <h1>🟢 FUV Chat Backend Running</h1>
+                <p>The chat server is online and ready to accept connections.</p>
+                <hr>
+                <p><a href="/health">Health Check</a> | <a href="/public_key">Public Key</a></p>
+            </body>
+            </html>
+            """, 200
+
+        @self.app.route("/health")
+        def health():
+            return "ok", 200
+
+        @self.app.route("/public_key")
+        def public_key():
+            try:
+                pub = self._private_key.public_key().public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                )
+                return pub, 200, {"Content-Type": "application/x-pem-file"}
+            except Exception:
+                return "unavailable", 500
 
         @self.sio.event
         def disconnect(sid):
@@ -766,9 +821,31 @@ class ChatServer:
                         del self.active_file_transfers[transfer_id]
 
 
+# Create server instance at module level for gunicorn
+_chat_server_instance = None
+
+def get_app():
+    """Get or create server instance (for gunicorn)."""
+    global _chat_server_instance
+    if _chat_server_instance is None:
+        _chat_server_instance = ChatServer()
+    return _chat_server_instance.app
+
 if __name__ == "__main__":
     server = ChatServer()
-    HOST = os.environ.get("CHAT_HOST", "localhost")
-    PORT = int(os.environ.get("CHAT_PORT", 5000))
+    # Render provides PORT env var; use CHAT_PORT or default 5000 otherwise
+    PORT = int(os.environ.get("PORT") or os.environ.get("CHAT_PORT", 5000))
+    # Always bind to 0.0.0.0 for cloud deployments (Render, AWS, etc.)
+    HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
     logging.info(f"Starting server on {HOST}:{PORT}")
-    eventlet.wsgi.server(eventlet.listen((HOST, PORT)), server.app)
+    
+    # Use gevent WSGI server for production deployments
+    try:
+        from gevent import pywsgi
+        logging.info("Using gevent WSGI server")
+        http_server = pywsgi.WSGIServer((HOST, PORT), server.app)
+        http_server.serve_forever()
+    except ImportError:
+        # Fallback to Flask dev server (not for production)
+        logging.warning("gevent not available, using Flask dev server")
+        server.app.run(host=HOST, port=PORT, debug=False)

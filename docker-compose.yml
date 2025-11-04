@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  # Chat Server
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: chat-server
+    ports:
+      - "5000:5000"
+    environment:
+      - CHAT_HOST=0.0.0.0
+      - CHAT_PORT=5000
+      - PORT=5000
+    volumes:
+      # Persist uploads directory
+      - ./server/uploads:/server/uploads
+    networks:
+      - chat-network
+    restart: unless-stopped
+
+  # Chat Client
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    container_name: chat-client
+    environment:
+      - CHAT_SERVER_URL=http://server:5000
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      # Mount X11 socket for GUI display (Linux/macOS)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Allow .env file override (optional)
+      # - ./client/.env:/app/client/.env:ro
+    depends_on:
+      - server
+    networks:
+      - chat-network
+    restart: unless-stopped
+    # Note: GUI applications may require special setup for your host system
+    # For headless mode or VNC, uncomment the following lines:
+    # stdin_open: true
+    # tty: true
+
+networks:
+  chat-network:
+    driver: bridge
+
+# Optional: For development, you might want to add volumes to mount source code
+# Uncomment below for development mode:
+# volumes:
+#   server-code:
+#     driver: local
+#   client-code:
+#     driver: local
+

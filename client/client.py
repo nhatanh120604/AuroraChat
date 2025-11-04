@@ -64,9 +64,19 @@ class ChatClient(QObject):
     avatarsUpdated = Signal("QVariant")  # username -> avatar payload
     avatarUpdated = Signal(str, "QVariant")  # username, avatar payload
 
-    def __init__(self, url="http://localhost:5000"):
+    def __init__(self, url=None):
         super().__init__()
-        self._url = url
+        # Resolve server URL from environment (.env supported)
+        try:
+            from dotenv import load_dotenv  # type: ignore
+            # Load .env from client directory
+            client_dir = os.path.dirname(os.path.abspath(__file__))
+            env_path = os.path.join(client_dir, '.env')
+            load_dotenv(env_path)
+        except Exception:
+            pass
+        resolved_url = url or os.environ.get("CHAT_SERVER_URL") or "http://localhost:5000"
+        self._url = resolved_url
         self._username = ""
         self._desired_username = ""
         self._sio = socketio.Client()
@@ -109,7 +119,8 @@ class ChatClient(QObject):
             # Establish session AES key with server
             try:
                 self._session_aes_key = generate_aes_key()
-                encrypted = rsa_encrypt_with_server_public_key(self._session_aes_key)
+                # Pass server URL so it can fetch public key dynamically
+                encrypted = rsa_encrypt_with_server_public_key(self._session_aes_key, self._url)
                 self._sio.emit("session_key", {"encrypted_aes_key": encrypted})
             except Exception as e:
                 self._notify_error(f"Failed to exchange session key: {e}")
@@ -1146,7 +1157,7 @@ def main():
     engine = QQmlApplicationEngine()
 
     # create client and expose to QML
-    chat = ChatClient("http://localhost:5000")
+    chat = ChatClient()
     engine.rootContext().setContextProperty("chatClient", chat)
 
     # load QML relative to this file
