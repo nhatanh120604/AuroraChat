@@ -1487,7 +1487,7 @@ ApplicationWindow {
                             property color hoverColor: window.palette.surface
                             property color activeColor: window.palette.accentSoft
                             property color borderColor: window.palette.outline
-                            readonly property url iconSource: Qt.resolvedUrl("../../assets/emoji_icon.svg")
+                            readonly property url iconSource: Qt.resolvedUrl("../assets/emoji_icon.svg")
                             onClicked: {
                                 var pos = mapToItem(null, 0, height)
                                 publicEmojiMenu.x = pos.x
@@ -1526,7 +1526,7 @@ ApplicationWindow {
                             property color hoverColor: window.palette.surface
                             property color activeColor: window.palette.accentSoft
                             property color borderColor: window.palette.outline
-                            readonly property url iconSource: Qt.resolvedUrl("../../assets/file_icon.svg")
+                            readonly property url iconSource: Qt.resolvedUrl("../assets/file_icon.svg")
                             onClicked: publicFileDialog.open()
                             background: Rectangle {
                                 radius: 18
