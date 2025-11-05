@@ -3,6 +3,7 @@
 ## Problem
 
 After WiFi disconnection and reconnection, users were seeing:
+
 ```
 ✓ Reconnected successfully!
 ❌ Username 'gfsdgf' is already taken.
@@ -19,6 +20,7 @@ After WiFi disconnection and reconnection, users were seeing:
 5. **Registration rejected** → "Username already taken" error
 
 ### Timeline
+
 ```
 T+0s:  WiFi drops
 T+0s:  Client detects disconnect immediately
@@ -37,6 +39,7 @@ T+30s: Server removes old session (too late!)
 ### 1. **Stale Session Cleanup** (Server-Side)
 
 When a user tries to register with a username that already exists:
+
 - Check if it's from a **different session ID**
 - If yes, **remove the old (stale) session** automatically
 - Allow the new session to register successfully
@@ -50,14 +53,14 @@ with self.lock:
         if (name or "").lower() == username.lower():
             existing_sid = s
             break
-    
+
     # If the same user is reconnecting (different SID), remove old session
     if existing_sid and existing_sid != sid:
         logging.info(f"User '{username}' reconnecting - removing old session {existing_sid}")
         self.clients.pop(existing_sid, None)
         self.session_keys.pop(existing_sid, None)
         # Avatar is kept for the username
-    
+
     # Register the new session
     self.clients[sid] = username
 ```
@@ -73,7 +76,7 @@ self.sio = socketio.Server(
 )
 ```
 
-**Before**: Server took 30-60s to detect TCP timeout  
+**Before**: Server took 30-60s to detect TCP timeout
 **After**: Server detects disconnect in ~10-15s maximum
 
 ---
@@ -81,6 +84,7 @@ self.sio = socketio.Server(
 ## How It Works Now
 
 ### New Timeline
+
 ```
 T+0s:  WiFi drops
 T+0s:  Client detects disconnect immediately
@@ -98,18 +102,19 @@ T+10s: Server's ping/pong detects old connection is dead (cleanup happens)
 
 ## Benefits
 
-✅ **No more "username taken" errors** on reconnection  
-✅ **Faster disconnect detection** (10s instead of 30-60s)  
-✅ **Seamless user experience** - reconnection "just works"  
-✅ **Keeps user avatar** - Avatar persists across reconnections  
-✅ **Thread-safe** - All operations protected by lock  
-✅ **Logging for debugging** - Clear logs when stale sessions are removed  
+✅ **No more "username taken" errors** on reconnection
+✅ **Faster disconnect detection** (10s instead of 30-60s)
+✅ **Seamless user experience** - reconnection "just works"
+✅ **Keeps user avatar** - Avatar persists across reconnections
+✅ **Thread-safe** - All operations protected by lock
+✅ **Logging for debugging** - Clear logs when stale sessions are removed
 
 ---
 
 ## Testing
 
 ### Test Case 1: Quick WiFi Drop
+
 ```
 1. Connect as "alice"
 2. Disconnect WiFi for 2 seconds
@@ -118,6 +123,7 @@ T+10s: Server's ping/pong detects old connection is dead (cleanup happens)
 ```
 
 ### Test Case 2: Extended Outage
+
 ```
 1. Connect as "bob"
 2. Disconnect WiFi for 30 seconds
@@ -126,6 +132,7 @@ T+10s: Server's ping/pong detects old connection is dead (cleanup happens)
 ```
 
 ### Test Case 3: Server Still Has Old Session
+
 ```
 1. Connect as "charlie"
 2. Forcefully kill client app (no graceful disconnect)
@@ -139,20 +146,25 @@ T+10s: Server's ping/pong detects old connection is dead (cleanup happens)
 ## Edge Cases Handled
 
 ### Case 1: Same SID Re-registering
+
 ```python
 elif existing_sid == sid:
     # Same SID trying to re-register - just update
     logging.info(f"User '{username}' re-registering with same SID {sid}")
 ```
+
 If the same session tries to register again, just allow it (no cleanup needed).
 
 ### Case 2: Different User Takes Name
+
 Original behavior preserved: If user "alice" is **actively connected** and user "bob" tries to register as "alice", it's still rejected (case-insensitive check).
 
 ### Case 3: Avatar Preservation
+
 ```python
 # Note: avatar is kept for the username
 ```
+
 When removing stale session, we don't remove the avatar so the user keeps their profile picture.
 
 ---
@@ -160,6 +172,7 @@ When removing stale session, we don't remove the avatar so the user keeps their 
 ## Files Modified
 
 1. **`server/server.py`**
+
    - Line ~100: Added `ping_timeout=10, ping_interval=5`
    - Line ~257-270: Replaced username uniqueness check with stale session cleanup logic
 
@@ -172,6 +185,7 @@ When removing stale session, we don't remove the avatar so the user keeps their 
 ## Logs Example
 
 ### Before Fix
+
 ```
 2025-11-05 10:15:30 - INFO - Client disconnected: abc123
 2025-11-05 10:15:31 - INFO - Client connected: def456
@@ -179,6 +193,7 @@ When removing stale session, we don't remove the avatar so the user keeps their 
 ```
 
 ### After Fix
+
 ```
 2025-11-05 10:15:30 - INFO - Client disconnected: abc123
 2025-11-05 10:15:31 - INFO - Client connected: def456
@@ -191,6 +206,7 @@ When removing stale session, we don't remove the avatar so the user keeps their 
 ## Future Improvements
 
 Potential enhancements (not currently needed):
+
 - [ ] Exponential backoff on server ping intervals during high load
 - [ ] Maximum concurrent sessions per username (e.g., allow 2 devices)
 - [ ] Session migration token (client sends proof of previous session)
@@ -200,7 +216,7 @@ Potential enhancements (not currently needed):
 
 ## ✅ Status
 
-**Problem**: Fixed ✅  
-**Tested**: Manual testing complete ✅  
-**Documented**: Yes ✅  
+**Problem**: Fixed ✅
+**Tested**: Manual testing complete ✅
+**Documented**: Yes ✅
 **Production Ready**: Yes ✅

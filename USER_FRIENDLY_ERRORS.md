@@ -1,6 +1,7 @@
 # User-Friendly Error Messages
 
 ## Overview
+
 All error messages shown to users are now clean and user-friendly, without exposing technical implementation details or stack traces.
 
 ---
@@ -9,29 +10,29 @@ All error messages shown to users are now clean and user-friendly, without expos
 
 ### Connection Errors
 
-| Technical Error (Hidden from User) | User-Friendly Message |
-|-----------------------------------|----------------------|
+| Technical Error (Hidden from User)                          | User-Friendly Message                                                |
+| ----------------------------------------------------------- | -------------------------------------------------------------------- |
 | `HTTPSConnectionPool(host='...', port=443): Read timed out` | "Unable to connect to server. Please check your network connection." |
-| `Failed to exchange session key: [exception]` | "Unable to establish secure connection. Please check your network." |
-| `Connection error: [exception]` | "Unable to connect to server. Please check your network connection." |
+| `Failed to exchange session key: [exception]`               | "Unable to establish secure connection. Please check your network."  |
+| `Connection error: [exception]`                             | "Unable to connect to server. Please check your network connection." |
 
 ### Message Sending Errors
 
-| Technical Error (Hidden from User) | User-Friendly Message |
-|-----------------------------------|----------------------|
-| `Failed to send 'register': [exception]` | "Unable to send data. Please check your connection." |
-| `Failed to emit 'message': [exception]` | "Unable to send message. Please check your connection." |
-| `Failed to send secure message: [exception]` | "Failed to send message. Please check your connection." |
+| Technical Error (Hidden from User)                   | User-Friendly Message                                           |
+| ---------------------------------------------------- | --------------------------------------------------------------- |
+| `Failed to send 'register': [exception]`             | "Unable to send data. Please check your connection."            |
+| `Failed to emit 'message': [exception]`              | "Unable to send message. Please check your connection."         |
+| `Failed to send secure message: [exception]`         | "Failed to send message. Please check your connection."         |
 | `Failed to send secure private message: [exception]` | "Failed to send private message. Please check your connection." |
 
 ### File Transfer Errors
 
-| Technical Error (Hidden from User) | User-Friendly Message |
-|-----------------------------------|----------------------|
-| `Failed to reassemble file: [exception]` | "File transfer failed. Please try again." |
-| `Secure transfer failed: [exception]` | "File transfer failed. Please try again." |
-| `Failed to send unencrypted file: [exception]` | "Failed to send file. Please try again." |
-| `Failed to read file: [exception]` | "Failed to read file. Please check if the file is accessible." |
+| Technical Error (Hidden from User)             | User-Friendly Message                                          |
+| ---------------------------------------------- | -------------------------------------------------------------- |
+| `Failed to reassemble file: [exception]`       | "File transfer failed. Please try again."                      |
+| `Secure transfer failed: [exception]`          | "File transfer failed. Please try again."                      |
+| `Failed to send unencrypted file: [exception]` | "Failed to send file. Please try again."                       |
+| `Failed to read file: [exception]`             | "Failed to read file. Please check if the file is accessible." |
 
 ---
 
@@ -40,9 +41,11 @@ All error messages shown to users are now clean and user-friendly, without expos
 ### How It Works
 
 1. **Technical Logging (Console Only)**
+
    ```python
    print(f"[CLIENT] Connection error: {e}")  # For debugging
    ```
+
    - Technical details are logged to console for developers
    - Users never see these technical messages
 
@@ -56,22 +59,24 @@ All error messages shown to users are now clean and user-friendly, without expos
 
 ### Benefits
 
-✅ **Professional appearance** - No scary error messages  
-✅ **Better UX** - Users know what went wrong in simple terms  
-✅ **Actionable guidance** - Messages suggest what users can do  
-✅ **Still debuggable** - Technical details logged to console for developers  
-✅ **Consistent tone** - All messages follow the same friendly style  
+✅ **Professional appearance** - No scary error messages
+✅ **Better UX** - Users know what went wrong in simple terms
+✅ **Actionable guidance** - Messages suggest what users can do
+✅ **Still debuggable** - Technical details logged to console for developers
+✅ **Consistent tone** - All messages follow the same friendly style
 
 ---
 
 ## 📋 Complete Error Message List
 
 ### Connection & Security
+
 - ❌ "Unable to connect to server. Please check your network connection."
 - ❌ "Unable to establish secure connection. Please check your network."
 - ❌ "Unable to send data. Please check your connection."
 
 ### Messaging
+
 - ❌ "Unable to send message. Please check your connection."
 - ❌ "Failed to send message. Please check your connection."
 - ❌ "Failed to send private message. Please check your connection."
@@ -81,6 +86,7 @@ All error messages shown to users are now clean and user-friendly, without expos
 - ❌ "Session key not established; cannot send message securely."
 
 ### File Operations
+
 - ❌ "File transfer failed. Please try again."
 - ❌ "Failed to send file. Please try again."
 - ❌ "Failed to read file. Please check if the file is accessible."
@@ -92,6 +98,7 @@ All error messages shown to users are now clean and user-friendly, without expos
 - ❌ "Failed to start encrypted file transfer"
 
 ### Reconnection (Special Cases)
+
 - ℹ️ "Connection lost. Attempting to reconnect..."
 - ℹ️ "Reconnecting... (attempt X)"
 - ✅ "✓ Reconnected successfully!"
@@ -109,11 +116,13 @@ All technical error details are still logged to the console with the `[CLIENT]` 
 ```
 
 Developers can:
+
 1. Open console/terminal to see technical details
 2. Debug using the full exception information
 3. Track down root causes efficiently
 
 Users only see:
+
 ```
 ❌ Unable to connect to server. Please check your network connection.
 ```
@@ -131,11 +140,13 @@ All user-facing error messages follow these principles:
 5. **Use friendly tone** - Avoid harsh words like "error", "exception", "fatal"
 
 ### Good Examples ✅
+
 - "Unable to connect to server. Please check your network connection."
 - "File transfer failed. Please try again."
 - "Failed to read file. Please check if the file is accessible."
 
 ### Bad Examples ❌
+
 - ~~"HTTPSConnectionPool(host='...', port=443): Read timed out"~~
 - ~~"Exception in thread 'connection_thread': ConnectionError"~~
 - ~~"Fatal error: Failed to exchange session key: [Errno 104]"~~
@@ -152,6 +163,7 @@ To verify error messages are user-friendly:
 4. **Send empty message** → Should show: "Cannot send an empty message."
 
 **None of these should show technical error details like**:
+
 - HTTPSConnectionPool
 - Exception stack traces
 - Port numbers or hosts

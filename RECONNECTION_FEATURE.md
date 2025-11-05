@@ -1,6 +1,7 @@
 # ✅ Automatic Reconnection Feature
 
 ## Overview
+
 The chat application now automatically reconnects when WiFi/network connection is lost and restored.
 
 ---
@@ -8,28 +9,33 @@ The chat application now automatically reconnects when WiFi/network connection i
 ## 🎯 Features Implemented
 
 ### 1. **Automatic Reconnection with Exponential Backoff**
+
 - When connection drops, client automatically attempts to reconnect
 - Uses exponential backoff strategy: 1s → 2s → 4s → 8s → 16s → 30s (max)
 - Maximum 10 reconnection attempts before giving up
 - Prevents hammering the server during network instability
 
 ### 2. **User Notifications**
+
 - **On disconnect**: "Connection lost. Attempting to reconnect..."
 - **During reconnect**: "Reconnecting... (attempt X)"
 - **On success**: "✓ Reconnected successfully!"
 - Visual feedback with system messages in chat
 
 ### 3. **State Restoration**
+
 - Automatically re-registers username upon reconnection
 - Re-establishes encrypted session key
 - Flushes pending message queue
 - Syncs chat history
 
 ### 4. **Manual Disconnect Handling**
+
 - User-requested disconnect (app close) does NOT trigger auto-reconnect
 - Prevents unwanted reconnection when user intentionally quits
 
 ### 5. **Thread-Safe Implementation**
+
 - All reconnection logic runs in background threads
 - Proper locking to prevent race conditions
 - Non-blocking UI during reconnection attempts
@@ -71,6 +77,7 @@ Resume normal operation
 ### Server-Side (`server/server.py`)
 
 #### Reconnection Handling
+
 - **Automatic stale session cleanup**: When a user reconnects with the same username but different session ID, the server automatically removes the old (stale) session
 - **Faster disconnect detection**: Server pings clients every 5 seconds and waits 10 seconds for response before considering them disconnected
 - **Graceful username re-registration**: Same username can reconnect without "already taken" error
@@ -93,12 +100,14 @@ if existing_sid and existing_sid != sid:
 ### Client-Side (`client/client.py`)
 
 #### New Signals
+
 ```python
 reconnecting = Signal(int)  # Emits attempt number
 reconnected = Signal()      # Emits on successful reconnection
 ```
 
 #### New Instance Variables
+
 ```python
 self._reconnect_attempts = 0
 self._max_reconnect_attempts = 10
@@ -109,6 +118,7 @@ self._user_requested_disconnect = False
 ```
 
 #### Core Methods
+
 - `_start_reconnection()` - Spawns background reconnection thread
 - `_reconnection_loop()` - Implements exponential backoff retry logic
 - Updated `connect()` - Detects and notifies successful reconnection
@@ -118,6 +128,7 @@ self._user_requested_disconnect = False
 ### UI-Side (`client/qml/Main.qml`)
 
 #### New Event Handlers
+
 ```qml
 function onReconnecting(attempt) {
     // Shows "Reconnecting... (attempt X)" message
@@ -132,50 +143,55 @@ function onReconnected() {
 
 ## ✅ Requirements Met
 
-| Requirement | Status | Implementation |
-|-------------|--------|----------------|
-| Detect disconnection | ✅ | `disconnect()` event handler |
-| Notify user of disconnection | ✅ | System message in chat |
-| Automatic reconnection | ✅ | `_reconnection_loop()` with exponential backoff |
-| Retry with backoff | ✅ | 1s → 2s → 4s → 8s → ... → 30s max |
-| Max attempt limit | ✅ | 10 attempts before giving up |
-| Username re-registration | ✅ | Auto re-registers on reconnect |
-| Stale session cleanup | ✅ | Server removes old session when user reconnects |
-| Fast disconnect detection | ✅ | Server ping/pong every 5s (10s timeout) |
-| Session key re-establishment | ✅ | Auto re-establishes encrypted session |
-| Pending message queue flush | ✅ | Queued messages sent after reconnect |
-| User feedback during reconnect | ✅ | "Reconnecting (attempt X)" messages |
-| Success notification | ✅ | "✓ Reconnected successfully!" |
-| Manual disconnect handling | ✅ | No auto-reconnect on user quit |
-| Exception logging | ✅ | All errors logged to console |
+| Requirement                    | Status | Implementation                                  |
+| ------------------------------ | ------ | ----------------------------------------------- |
+| Detect disconnection           | ✅     | `disconnect()` event handler                    |
+| Notify user of disconnection   | ✅     | System message in chat                          |
+| Automatic reconnection         | ✅     | `_reconnection_loop()` with exponential backoff |
+| Retry with backoff             | ✅     | 1s → 2s → 4s → 8s → ... → 30s max               |
+| Max attempt limit              | ✅     | 10 attempts before giving up                    |
+| Username re-registration       | ✅     | Auto re-registers on reconnect                  |
+| Stale session cleanup          | ✅     | Server removes old session when user reconnects |
+| Fast disconnect detection      | ✅     | Server ping/pong every 5s (10s timeout)         |
+| Session key re-establishment   | ✅     | Auto re-establishes encrypted session           |
+| Pending message queue flush    | ✅     | Queued messages sent after reconnect            |
+| User feedback during reconnect | ✅     | "Reconnecting (attempt X)" messages             |
+| Success notification           | ✅     | "✓ Reconnected successfully!"                   |
+| Manual disconnect handling     | ✅     | No auto-reconnect on user quit                  |
+| Exception logging              | ✅     | All errors logged to console                    |
 
 ---
 
 ## 🧪 Testing Scenarios
 
 ### Test 1: Brief Network Interruption
+
 1. Start app, connect successfully
 2. Disable WiFi for 5 seconds
 3. Re-enable WiFi
 4. **Expected**: Auto-reconnects within 1-4 seconds, shows success message
 
 ### Test 2: Extended Outage
+
 1. Start app, connect successfully
 2. Disable WiFi for 2 minutes
 3. Re-enable WiFi
 4. **Expected**: Continues retrying with increasing delays, reconnects when WiFi returns
 
 ### Test 3: Permanent Network Failure
+
 1. Start app, connect successfully
 2. Disable WiFi permanently
 3. **Expected**: Shows 10 reconnection attempts over ~1-2 minutes, then gives up with error message
 
 ### Test 4: User Quit
+
 1. Start app, connect successfully
 2. Close app normally
 3. **Expected**: Gracefully disconnects, does NOT attempt to reconnect
 
 ### Test 5: Server Restart
+
 1. Client connected
 2. Restart server
 3. **Expected**: Client detects disconnect, auto-reconnects when server comes back
@@ -197,6 +213,7 @@ self._max_reconnect_delay = 30.0       # Maximum delay cap (default: 30s)
 ## 🎓 Technical Details
 
 ### Exponential Backoff Formula
+
 ```python
 delay = min(
     initial_delay * (2 ** (attempt - 1)),
@@ -205,14 +222,16 @@ delay = min(
 ```
 
 Examples:
-- Attempt 1: min(1 * 2^0, 30) = 1 second
-- Attempt 2: min(1 * 2^1, 30) = 2 seconds
-- Attempt 3: min(1 * 2^2, 30) = 4 seconds
-- Attempt 4: min(1 * 2^3, 30) = 8 seconds
-- Attempt 5: min(1 * 2^4, 30) = 16 seconds
-- Attempt 6: min(1 * 2^5, 30) = 30 seconds (capped)
+
+- Attempt 1: min(1 \* 2^0, 30) = 1 second
+- Attempt 2: min(1 \* 2^1, 30) = 2 seconds
+- Attempt 3: min(1 \* 2^2, 30) = 4 seconds
+- Attempt 4: min(1 \* 2^3, 30) = 8 seconds
+- Attempt 5: min(1 \* 2^4, 30) = 16 seconds
+- Attempt 6: min(1 \* 2^5, 30) = 30 seconds (capped)
 
 ### Why Exponential Backoff?
+
 1. **Reduces server load** during network issues
 2. **Prevents connection storms** when many clients reconnect simultaneously
 3. **Adapts to transient vs. persistent failures**
@@ -223,6 +242,7 @@ Examples:
 ## 🔒 Thread Safety
 
 All reconnection logic is thread-safe:
+
 - `_connect_lock` protects connection state flags
 - `_pending_lock` protects message queue
 - Background threads are daemon threads (auto-cleanup on app exit)
@@ -233,6 +253,7 @@ All reconnection logic is thread-safe:
 ## 🚀 Future Enhancements
 
 Potential improvements (not currently implemented):
+
 - [ ] Configurable retry strategy via UI settings
 - [ ] Network reachability detection (ping before retry)
 - [ ] Jitter in backoff delays to prevent thundering herd
