@@ -53,6 +53,8 @@ class ChatClient(QObject):
     privateTypingReceived = Signal(str, bool)  # username, is typing
     usersUpdated = Signal("QVariant")  # list of usernames
     disconnected = Signal()  # Signal to notify QML of disconnection
+    reconnecting = Signal(int)  # Signal to notify QML of reconnection attempt (attempt number)
+    reconnected = Signal()  # Signal to notify QML of successful reconnection
     errorReceived = Signal(str)  # Notify UI about errors
     usernameChanged = Signal(str)  # Notify UI when username changes
     generalHistoryReceived = Signal("QVariant")  # Provide public chat history snapshot
@@ -101,14 +103,23 @@ class ChatClient(QObject):
         self._completed_transfers = set()
         self._debug_enabled = True
 
+        # Reconnection logic
+        self._reconnect_attempts = 0
+        self._max_reconnect_attempts = 10
+        self._reconnect_delay = 1.0  # Start with 1 second
+        self._max_reconnect_delay = 30.0  # Max 30 seconds between attempts
+        self._should_reconnect = True
+        self._reconnect_thread = None
+        self._user_requested_disconnect = False
+
         self._setup_handlers()
 
     def _dbg(self, *args):
         try:
             if self._debug_enabled:
                 print("[CLIENT]", *args)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[CLIENT] Debug logging error: {e}")
 
     def _setup_handlers(self):
         @self._sio.event
@@ -116,6 +127,12 @@ class ChatClient(QObject):
             print("Connected")
             self._connected = True
             self._connecting = False
+
+            # Reset reconnection state on successful connection
+            was_reconnecting = self._reconnect_attempts > 0
+            self._reconnect_attempts = 0
+            self._reconnect_delay = 1.0
+
             # Establish session AES key with server
             try:
                 self._session_aes_key = generate_aes_key()
@@ -123,7 +140,8 @@ class ChatClient(QObject):
                 encrypted = rsa_encrypt_with_server_public_key(self._session_aes_key, self._url)
                 self._sio.emit("session_key", {"encrypted_aes_key": encrypted})
             except Exception as e:
-                self._notify_error(f"Failed to exchange session key: {e}")
+                print(f"[CLIENT] Failed to exchange session key: {e}")
+                self._notify_error("Unable to establish secure connection. Please check your network.")
             queued_register = False
             with self._pending_lock:
                 queued_register = any(
@@ -137,7 +155,13 @@ class ChatClient(QObject):
                 try:
                     self._sio.emit(event, payload)
                 except Exception as exc:
-                    self._notify_error(f"Failed to send '{event}': {exc}")
+                    print(f"[CLIENT] Failed to send '{event}': {exc}")
+                    self._notify_error("Unable to send data. Please check your connection.")
+
+            # Notify UI of successful reconnection
+            if was_reconnecting:
+                print("[CLIENT] Successfully reconnected")
+                self.reconnected.emit()
 
         @self._sio.on("session_key_ok")
         def on_session_key_ok(data):
@@ -167,6 +191,11 @@ class ChatClient(QObject):
             self._set_username("")
             self.disconnected.emit()  # Notify the UI
             self._history_synced = False
+
+            # Start automatic reconnection if not a user-requested disconnect
+            if self._should_reconnect and not self._user_requested_disconnect:
+                print("[CLIENT] Connection lost, will attempt to reconnect...")
+                self._start_reconnection()
 
         @self._sio.on("message")
         def on_message(data):
@@ -405,6 +434,51 @@ class ChatClient(QObject):
 
         # Sent confirmations are plaintext
 
+    def _start_reconnection(self):
+        """Start the reconnection loop in a background thread."""
+        if self._reconnect_thread and self._reconnect_thread.is_alive():
+            return  # Already trying to reconnect
+
+        self._reconnect_thread = threading.Thread(target=self._reconnection_loop, daemon=True)
+        self._reconnect_thread.start()
+
+    def _reconnection_loop(self):
+        """Attempt to reconnect with exponential backoff."""
+        while self._should_reconnect and not self._connected:
+            self._reconnect_attempts += 1
+
+            if self._reconnect_attempts > self._max_reconnect_attempts:
+                print(f"[CLIENT] Max reconnection attempts ({self._max_reconnect_attempts}) reached. Giving up.")
+                self._notify_error(f"Failed to reconnect after {self._max_reconnect_attempts} attempts.")
+                break
+
+            print(f"[CLIENT] Reconnection attempt {self._reconnect_attempts}/{self._max_reconnect_attempts}...")
+            self.reconnecting.emit(self._reconnect_attempts)
+
+            try:
+                with self._connect_lock:
+                    self._connecting = True
+
+                self._sio.connect(self._url)
+                # If we reach here, connection succeeded
+                print(f"[CLIENT] Reconnection successful on attempt {self._reconnect_attempts}")
+                return
+
+            except Exception as e:
+                print(f"[CLIENT] Reconnection attempt {self._reconnect_attempts} failed: {e}")
+                with self._connect_lock:
+                    self._connecting = False
+
+                # Exponential backoff with max cap
+                delay = min(self._reconnect_delay * (2 ** (self._reconnect_attempts - 1)), self._max_reconnect_delay)
+                print(f"[CLIENT] Waiting {delay:.1f} seconds before next attempt...")
+                time.sleep(delay)
+
+        # Reset if loop exits without success
+        if not self._connected:
+            with self._connect_lock:
+                self._connecting = False
+
     def _ensure_connected(self):
         # use a lock to prevent race conditions on state flags
         with self._connect_lock:
@@ -417,10 +491,11 @@ class ChatClient(QObject):
                 # blocking connect in background thread
                 self._sio.connect(self._url)
             except Exception as e:
-                print("Connection error:", e)
+                print(f"[CLIENT] Connection error: {e}")
                 # if connect fails, reset the flag so we can try again
-                self._connecting = False
-                self._notify_error(f"Connection error: {e}")
+                with self._connect_lock:
+                    self._connecting = False
+                self._notify_error("Unable to connect to server. Please check your network connection.")
 
         t = threading.Thread(target=_connect, daemon=True)
         t.start()
@@ -436,7 +511,8 @@ class ChatClient(QObject):
             try:
                 self._sio.emit(event, data)
             except Exception as exc:
-                self._notify_error(f"Failed to send '{event}': {exc}")
+                print(f"[CLIENT] Failed to emit '{event}': {exc}")
+                self._notify_error("Unable to send message. Please check your connection.")
         else:
             self._ensure_connected()
 
@@ -635,7 +711,7 @@ class ChatClient(QObject):
                     self._received_chunks.pop(transfer_id, None)
 
         except Exception as e:
-            self.fileTransferError.emit(transfer_id, f"Failed to reassemble file: {e}")
+            self.fileTransferError.emit(transfer_id, "File transfer failed. Please try again.")
             print(f"Error reassembling file {transfer_id}: {e}")
 
     def _send_encrypted_file_chunks(
@@ -741,7 +817,8 @@ class ChatClient(QObject):
             return transfer_id
 
         except Exception as e:
-            self._notify_error(f"Secure transfer failed: {e}")
+            print(f"[CLIENT] Secure transfer failed: {e}")
+            self._notify_error("File transfer failed. Please try again.")
             return None
 
     def _send_unencrypted_file(
@@ -768,7 +845,8 @@ class ChatClient(QObject):
             return f"unencrypted_{uuid.uuid4().hex[:8]}"
 
         except Exception as e:
-            self._notify_error(f"Failed to send unencrypted file: {e}")
+            print(f"[CLIENT] Failed to send unencrypted file: {e}")
+            self._notify_error("Failed to send file. Please try again.")
             return None
 
     def _send_secure_text_message(self, text: str):
@@ -786,7 +864,8 @@ class ChatClient(QObject):
             }
             self._emit_post_key("message", payload)
         except Exception as e:
-            self._notify_error(f"Failed to send secure message: {e}")
+            print(f"[CLIENT] Failed to send secure message: {e}")
+            self._notify_error("Failed to send message. Please check your connection.")
 
     def _send_secure_private_message(self, recipient: str, text: str):
         try:
@@ -804,7 +883,8 @@ class ChatClient(QObject):
             }
             self._emit_post_key("private_message", payload)
         except Exception as e:
-            self._notify_error(f"Failed to send secure private message: {e}")
+            print(f"[CLIENT] Failed to send secure private message: {e}")
+            self._notify_error("Failed to send private message. Please check your connection.")
 
     @Slot(str, result="QVariant")
     def inspectFile(self, file_url: str):
@@ -887,7 +967,8 @@ class ChatClient(QObject):
                     self._notify_error("Failed to start encrypted file transfer")
 
             except Exception as e:
-                self._notify_error(f"Failed to read file: {e}")
+                print(f"[CLIENT] Failed to read file: {e}")
+                self._notify_error("Failed to read file. Please check if the file is accessible.")
         else:
             # Encrypted text message
             if not text:
@@ -939,7 +1020,8 @@ class ChatClient(QObject):
                     self._notify_error("Failed to start encrypted file transfer")
 
             except Exception as e:
-                self._notify_error(f"Failed to read file: {e}")
+                print(f"[CLIENT] Failed to read file: {e}")
+                self._notify_error("Failed to read file. Please check if the file is accessible.")
         else:
             # Encrypted private text message
             if not text:
@@ -955,13 +1037,20 @@ class ChatClient(QObject):
 
     @Slot()
     def disconnect(self):
+        """Manually disconnect from the server (user-requested)."""
+        print("[CLIENT] User requested disconnect")
+        self._user_requested_disconnect = True
+        self._should_reconnect = False
+
         try:
-            if self._connected:
+            if self._sio.connected:
                 self._sio.disconnect()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[CLIENT] Error during disconnect: {e}")
         finally:
             self._desired_username = ""
+            self._connected = False
+            self._connecting = False
 
     def _send_typing_state(
         self, context: str, is_typing: bool, recipient: Optional[str] = None

@@ -2797,7 +2797,7 @@ ApplicationWindow {
             window.userAvatars = ({})
             messagesModel.append({
                 "user": "System",
-                "text": "You have been disconnected.",
+                "text": "Connection lost. Attempting to reconnect...",
                 "isPrivate": false,
                 "fileName": "",
                 "fileMime": "",
@@ -2806,6 +2806,40 @@ ApplicationWindow {
             })
             window.setConversationUnread("public", false)
             disconnectAnimation.restart()
+        }
+
+        function onReconnecting(attempt) {
+            console.log("[QML] Reconnection attempt:", attempt)
+            messagesModel.append({
+                "user": "System",
+                "text": "Reconnecting... (attempt " + attempt + ")",
+                "isPrivate": false,
+                "fileName": "",
+                "fileMime": "",
+                "fileData": "",
+                "fileSize": 0
+            })
+            var page = window.conversationPages["public"]
+            if (page && page.scrollToEnd) {
+                page.scrollToEnd(false)
+            }
+        }
+
+        function onReconnected() {
+            console.log("[QML] Successfully reconnected")
+            messagesModel.append({
+                "user": "System",
+                "text": "✓ Reconnected successfully!",
+                "isPrivate": false,
+                "fileName": "",
+                "fileMime": "",
+                "fileData": "",
+                "fileSize": 0
+            })
+            var page = window.conversationPages["public"]
+            if (page && page.scrollToEnd) {
+                page.scrollToEnd(false)
+            }
         }
 
         function onErrorReceived(message) {

@@ -100,6 +100,8 @@ class ChatServer:
         self.sio = socketio.Server(
             cors_allowed_origins="*",
             max_http_buffer_size=MAX_FILE_BYTES * 2,
+            ping_timeout=10,  # Server waits 10s for ping response before disconnect
+            ping_interval=5,   # Server sends ping every 5s to check connection
         )
         self.app = Flask(__name__)
         self.app.wsgi_app = socketio.WSGIApp(self.sio, self.app.wsgi_app)
@@ -256,17 +258,22 @@ class ChatServer:
             username = username.strip()
 
             with self.lock:
-                # Enforce unique usernames (case-insensitive)
-                if any((name or "").lower() == username.lower() for name in self.clients.values()):
-                    self.sio.emit(
-                        "error",
-                        {"message": f"Username '{username}' is already taken."},
-                        to=sid,
-                    )
-                    logging.warning(
-                        f"Registration failed for {sid}: username '{username}' taken."
-                    )
-                    return
+                # Check if username is already in use by a DIFFERENT session
+                existing_sid = None
+                for s, name in self.clients.items():
+                    if (name or "").lower() == username.lower():
+                        existing_sid = s
+                        break
+                
+                # If the same user is reconnecting (different SID), remove old session
+                if existing_sid and existing_sid != sid:
+                    logging.info(f"User '{username}' reconnecting - removing old session {existing_sid}")
+                    self.clients.pop(existing_sid, None)
+                    self.session_keys.pop(existing_sid, None)
+                    # Note: avatar is kept for the username
+                elif existing_sid == sid:
+                    # Same SID trying to re-register - just update
+                    logging.info(f"User '{username}' re-registering with same SID {sid}")
 
                 self.clients[sid] = username
                 users_snapshot = list(self.clients.values())
